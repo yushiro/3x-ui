@@ -32,6 +32,7 @@ import {
   canEnableTls,
   isSS2022,
 } from '@/lib/xray/protocol-capabilities';
+import { resolveShareHost } from '@/lib/xray/inbound-link';
 import {
   InboundDbFieldsSchema,
   InboundFormBaseSchema,
@@ -62,6 +63,7 @@ import {
   HysteriaFields,
   MixedFields,
   MtprotoFields,
+  SnellFields,
   ShadowsocksFields,
   TunFields,
   TunnelFields,
@@ -216,6 +218,7 @@ export default function InboundFormModal({
 
   const selectableNodes = (availableNodes || []).filter((n) => n.enable);
   const protocol = (useWatch({ control, name: 'protocol' }) ?? '') as string;
+  const isSnell = protocol === Protocols.SNELL;
   const isNodeEligible = NODE_ELIGIBLE_PROTOCOLS.has(protocol);
   /*
    * The `node` share-address strategy only means something when the inbound can
@@ -251,6 +254,7 @@ export default function InboundFormModal({
   const isUdsListen = wListen.startsWith('/') || wListen.startsWith('@');
   const wNodeId = useWatch({ control, name: 'nodeId' }) ?? null;
   const shareAddrStrategy = useWatch({ control, name: 'shareAddrStrategy' }) ?? 'node';
+  const wShareAddr = (useWatch({ control, name: 'shareAddr' }) ?? '') as string;
   const wTag = (useWatch({ control, name: 'tag' }) ?? '') as string;
   const wSsNetwork = useWatch({ control, name: 'settings.network' });
   const wTunnelNetwork = useWatch({ control, name: 'settings.allowedNetwork' });
@@ -270,6 +274,14 @@ export default function InboundFormModal({
     (protocol === Protocols.VLESS || protocol === Protocols.TROJAN)
     && network === 'tcp'
     && (security === 'tls' || security === 'reality');
+  const snellNodeHost = typeof wNodeId === 'number'
+    ? (selectableNodes.find((node) => node.id === wNodeId)?.address ?? '')
+    : '';
+  const snellHost = resolveShareHost(
+    { listen: wListen, shareAddr: wShareAddr, shareAddrStrategy: String(shareAddrStrategy) },
+    snellNodeHost,
+    window.location.hostname,
+  );
 
   const {
     genRealityKeypair,
@@ -437,7 +449,9 @@ export default function InboundFormModal({
       if (!NODE_ELIGIBLE_PROTOCOLS.has(next)) {
         setV('nodeId', null);
       }
-      if (next === Protocols.HYSTERIA) {
+      if (next === Protocols.SNELL || next === Protocols.MTPROTO) {
+        setV('streamSettings', undefined);
+      } else if (next === Protocols.HYSTERIA) {
         setV('streamSettings', {
           network: 'hysteria',
           security: 'tls',
@@ -472,9 +486,19 @@ export default function InboundFormModal({
      * standalone Client modal, not this inbound modal). With shouldUnregister
      * false those pass-through sub-trees survive from the reset object, so the
      * update wire payload never silently drops every client on save.
-     */
+    */
     const values = methods.getValues() as InboundFormValues;
-    const parsed = InboundFormSchema.safeParse(values);
+    // Editing a redacted/cleared Snell PSK deliberately keeps `psk: ""` on
+    // the wire. The backend interprets that as "preserve the existing PSK";
+    // validate the rest of the edit against a placeholder without silently
+    // generating or replacing the user's secret.
+    const emptySnellEdit = mode === 'edit'
+      && values.protocol === Protocols.SNELL
+      && typeof (values.settings as { psk?: unknown }).psk === 'string'
+      && (values.settings as { psk: string }).psk.trim() === '';
+    const parsed = InboundFormSchema.safeParse(emptySnellEdit
+      ? { ...values, settings: { ...(values.settings as object), psk: 'preserve-existing-psk' } }
+      : values);
     if (!parsed.success) {
       const issues = parsed.error.issues;
       messageApi.error(formatInboundValidation(issues, values, t));
@@ -486,7 +510,7 @@ export default function InboundFormModal({
     }
     setSaving(true);
     try {
-      const payload = formValuesToWirePayload(parsed.data);
+      const payload = formValuesToWirePayload(emptySnellEdit ? values : parsed.data);
       const url = mode === 'edit' && dbInbound
         ? `/panel/api/inbounds/update/${dbInbound.id}`
         : '/panel/api/inbounds/add';
@@ -579,12 +603,14 @@ export default function InboundFormModal({
         </FormField>
       )}
 
-      <FormField
-        name="subSortIndex"
-        label={labelWithHint(t('pages.inbounds.form.subSortIndex'), t('pages.inbounds.form.subSortIndexHelp'))}
-      >
-        <InputNumber min={1} />
-      </FormField>
+      {!isSnell && (
+        <FormField
+          name="subSortIndex"
+          label={labelWithHint(t('pages.inbounds.form.subSortIndex'), t('pages.inbounds.form.subSortIndexHelp'))}
+        >
+          <InputNumber min={1} />
+        </FormField>
+      )}
 
       <FormField
         name="port"
@@ -631,18 +657,20 @@ export default function InboundFormModal({
         </FormField>
       )}
 
-      <Form.Item
-        label={
-          <Tooltip title={t('pages.inbounds.leaveBlankToNeverExpire')}>
-            {t('pages.inbounds.expireDate')}
-          </Tooltip>
-        }
-      >
-        <DateTimePicker
-          value={wExpiry > 0 ? dayjs(wExpiry) : null}
-          onChange={(d) => setV('expiryTime', d ? d.valueOf() : 0)}
-        />
-      </Form.Item>
+      {!isSnell && (
+        <Form.Item
+          label={
+            <Tooltip title={t('pages.inbounds.leaveBlankToNeverExpire')}>
+              {t('pages.inbounds.expireDate')}
+            </Tooltip>
+          }
+        >
+          <DateTimePicker
+            value={wExpiry > 0 ? dayjs(wExpiry) : null}
+            onChange={(d) => setV('expiryTime', d ? d.valueOf() : 0)}
+          />
+        </Form.Item>
+      )}
     </>
   );
 
@@ -670,6 +698,8 @@ export default function InboundFormModal({
       {protocol === Protocols.MIXED && <MixedFields mixedUdpOn={mixedUdpOn} />}
 
       {protocol === Protocols.MTPROTO && <MtprotoFields />}
+
+      {isSnell && <SnellFields host={snellHost} />}
 
       {protocol === Protocols.SHADOWSOCKS && <ShadowsocksFields isSSWith2022={isSSWith2022} />}
 
@@ -964,10 +994,11 @@ export default function InboundFormModal({
                 Protocols.TUN,
                 Protocols.WIREGUARD,
                 Protocols.MTPROTO,
+                Protocols.SNELL,
               ] as string[]).includes(protocol) || isFallbackHost
                 ? [{ key: 'protocol', label: t('pages.inbounds.protocol'), children: protocolTab, forceRender: true }]
                 : []),
-              ...(streamEnabled
+              ...(!isSnell && streamEnabled
                 ? [
                   { key: 'stream', label: t('pages.inbounds.streamTab'), children: streamTab, forceRender: true },
                   ...(protocol !== Protocols.WIREGUARD && protocol !== Protocols.TUNNEL
@@ -975,10 +1006,10 @@ export default function InboundFormModal({
                     : []),
                 ]
                 : []),
-              ...(sniffingSupported
+              ...(!isSnell && sniffingSupported
                 ? [{ key: 'sniffing', label: t('pages.inbounds.sniffingTab'), children: sniffingTab, forceRender: true }]
                 : []),
-              { key: 'advanced', label: t('pages.xray.advancedTemplate'), children: advancedTab, forceRender: true },
+              ...(!isSnell ? [{ key: 'advanced', label: t('pages.xray.advancedTemplate'), children: advancedTab, forceRender: true }] : []),
             ]} />
           </Form>
         </FormProvider>

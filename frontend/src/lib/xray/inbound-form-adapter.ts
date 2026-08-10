@@ -331,7 +331,9 @@ export function formValuesToWirePayload(values: InboundFormValues): WireInboundP
   if (Array.isArray(settingsPruned.clients)) {
     settingsPruned.clients = normalizeClients(values.protocol, settingsPruned.clients);
   }
-  let streamPruned = values.streamSettings
+  let streamPruned = values.protocol === 'snell'
+    ? undefined
+    : values.streamSettings
     ? ((pruneEmpty(values.streamSettings) ?? {}) as Record<string, unknown>)
     : undefined;
   if (streamPruned) {

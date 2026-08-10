@@ -4,6 +4,7 @@ import type { HttpInboundSettings } from '@/schemas/protocols/inbound/http';
 import type { HysteriaClient, HysteriaInboundSettings } from '@/schemas/protocols/inbound/hysteria';
 import type { MixedInboundSettings } from '@/schemas/protocols/inbound/mixed';
 import type { MtprotoClient, MtprotoInboundSettings } from '@/schemas/protocols/inbound/mtproto';
+import type { SnellInboundSettings } from '@/schemas/protocols/inbound/snell';
 import type { ShadowsocksClient, ShadowsocksInboundSettings } from '@/schemas/protocols/inbound/shadowsocks';
 import type { TrojanClient, TrojanInboundSettings } from '@/schemas/protocols/inbound/trojan';
 import type { TunInboundSettings } from '@/schemas/protocols/inbound/tun';
@@ -223,6 +224,10 @@ export function createDefaultMtprotoInboundSettings(): MtprotoInboundSettings {
   };
 }
 
+export function createDefaultSnellInboundSettings(): SnellInboundSettings {
+  return { psk: RandomUtil.randomSeq(32) };
+}
+
 // createDefaultMtprotoClient seeds a new MTProto client with a fresh FakeTLS
 // secret fronting the given domain. Mirrors the WireGuard client default: the
 // backend re-derives the secret on save, so this is only for immediate display.
@@ -290,7 +295,8 @@ export type AnyInboundSettings =
   | TunInboundSettings
   | TunnelInboundSettings
   | WireguardInboundSettings
-  | MtprotoInboundSettings;
+  | MtprotoInboundSettings
+  | SnellInboundSettings;
 
 export function createDefaultInboundSettings(protocol: string): AnyInboundSettings | null {
   switch (protocol) {
@@ -305,6 +311,7 @@ export function createDefaultInboundSettings(protocol: string): AnyInboundSettin
     case 'tun':         return createDefaultTunInboundSettings();
     case 'wireguard':   return createDefaultWireguardInboundSettings();
     case 'mtproto':     return createDefaultMtprotoInboundSettings();
+    case 'snell':       return createDefaultSnellInboundSettings();
     default:            return null;
   }
 }
