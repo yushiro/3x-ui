@@ -8,6 +8,19 @@ import (
 	wgutil "github.com/mhsanaei/3x-ui/v3/internal/util/wireguard"
 )
 
+func TestClashSubscriptionOmitsSnell(t *testing.T) {
+	initSubDB(t)
+	seedSnellSubscriptionInbound(t, "snell-clash")
+
+	out, _, err := NewSubClashService(false, "", NewSubService("")).GetClash("snell-clash", "sub.example.com")
+	if err != nil {
+		t.Fatalf("GetClash: %v", err)
+	}
+	if out != "" {
+		t.Fatalf("Clash subscription exported Snell: %q", out)
+	}
+}
+
 func TestEnsureUniqueProxyNames(t *testing.T) {
 	proxies := []map[string]any{
 		{"name": "", "type": "vless", "server": "a.com", "port": 443},

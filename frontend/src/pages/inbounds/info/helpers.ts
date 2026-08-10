@@ -7,6 +7,7 @@ import {
   isSS2022 as isSS2022Helper,
   isSSMultiUser as isSSMultiUserHelper,
 } from '@/lib/xray/protocol-capabilities';
+import { isSnell } from '@/lib/xray/inbound-link';
 
 import type { ClientSetting, ClientStats, DBInboundLike, InboundInfo } from './types';
 
@@ -20,7 +21,7 @@ const LINK_PROTOCOLS: ReadonlySet<string> = new Set([
 ]);
 
 export function hasShareLink(protocol: string): boolean {
-  return LINK_PROTOCOLS.has(protocol);
+  return !isSnell(protocol) && LINK_PROTOCOLS.has(protocol);
 }
 
 function readHeader(headers: unknown, name: string): string {

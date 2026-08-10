@@ -6,8 +6,54 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mhsanaei/3x-ui/v3/internal/database"
 	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
 )
+
+func seedSnellSubscriptionInbound(t *testing.T, subID string) *model.Inbound {
+	t.Helper()
+	db := database.GetDB()
+	inbound := &model.Inbound{
+		UserId: 1, Tag: "snell-test", Enable: true, Listen: "203.0.113.5", Port: 443,
+		Protocol: model.Snell, Remark: "snell", Settings: `{"psk":"subscription-psk-must-not-escape"}`,
+	}
+	if err := db.Create(inbound).Error; err != nil {
+		t.Fatalf("seed Snell inbound: %v", err)
+	}
+	client := &model.ClientRecord{Email: "snell@e", SubID: subID, Enable: true}
+	if err := db.Create(client).Error; err != nil {
+		t.Fatalf("seed Snell client: %v", err)
+	}
+	if err := db.Create(&model.ClientInbound{ClientId: client.Id, InboundId: inbound.Id}).Error; err != nil {
+		t.Fatalf("attach Snell client: %v", err)
+	}
+	return inbound
+}
+
+func TestSubscriptionOmitsSnell(t *testing.T) {
+	initSubDB(t)
+	inbound := seedSnellSubscriptionInbound(t, "snell-sub")
+	if !isSnellInbound(inbound) {
+		t.Fatal("Snell inbound must be recognized at every subscription boundary")
+	}
+
+	links, emails, _, _, err := NewSubService("").GetSubs("snell-sub", "sub.example.com")
+	if err != nil {
+		t.Fatalf("GetSubs: %v", err)
+	}
+	joined := strings.Join(links, "\n")
+	if len(emails) != 0 || strings.Contains(joined, "snell") || strings.Contains(joined, "subscription-psk") {
+		t.Fatalf("Snell escaped raw subscription: links=%q emails=%v", joined, emails)
+	}
+
+	jsonOut, _, err := NewSubJsonService("", "", "", NewSubService("")).GetJson("snell-sub", "sub.example.com", true)
+	if err != nil {
+		t.Fatalf("GetJson: %v", err)
+	}
+	if jsonOut != "" || strings.Contains(jsonOut, "subscription-psk") {
+		t.Fatalf("Snell escaped JSON subscription: %q", jsonOut)
+	}
+}
 
 func TestSubscriptionExpiryFromClient(t *testing.T) {
 	const now = int64(1_700_000_000_000)

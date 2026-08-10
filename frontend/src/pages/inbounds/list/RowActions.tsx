@@ -16,6 +16,7 @@ import {
 } from '@ant-design/icons';
 
 import { isInboundMultiUser, showQrCodeMenu } from './helpers';
+import { isSnell } from '@/lib/xray/inbound-link';
 import type { DBInboundRecord, RowAction } from './types';
 
 interface RowActionsMenuProps {
@@ -46,7 +47,9 @@ export function buildRowActionsMenu({ record, subEnable, t, isMobile, hasClients
   } else {
     items.push({ key: 'showInfo', icon: <InfoCircleOutlined />, label: t('pages.inbounds.inboundInfo') });
   }
-  items.push({ key: 'clipboard', icon: <CopyOutlined />, label: t('pages.inbounds.exportInbound') });
+  if (!isSnell(record.protocol)) {
+    items.push({ key: 'clipboard', icon: <CopyOutlined />, label: t('pages.inbounds.exportInbound') });
+  }
   items.push({ key: 'resetTraffic', icon: <RetweetOutlined />, label: t('pages.inbounds.resetTraffic') });
   items.push({ key: 'clone', icon: <BlockOutlined />, label: t('pages.inbounds.clone') });
   if (isInboundMultiUser(record)) {

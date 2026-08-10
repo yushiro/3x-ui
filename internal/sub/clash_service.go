@@ -41,6 +41,9 @@ func (s *SubClashService) GetClash(subId string, host string) (string, string, e
 
 	seenEmails := make(map[string]struct{})
 	for _, inbound := range inbounds {
+		if isSnellInbound(inbound) {
+			continue
+		}
 		clients := subReq.matchingClients(inbound, subId)
 		if len(clients) == 0 {
 			continue
@@ -145,6 +148,9 @@ func fallbackProxyName(proxy map[string]any, idx int) string {
 }
 
 func (s *SubClashService) getProxies(subReq *SubService, inbound *model.Inbound, client model.Client, host string) []map[string]any {
+	if isSnellInbound(inbound) {
+		return nil
+	}
 	stream := s.streamData(inbound.StreamSettings)
 	// For node-managed inbounds the Clash proxy "server" must be the
 	// node's address, not the request host. resolveInboundAddress handles

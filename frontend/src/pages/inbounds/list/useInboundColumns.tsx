@@ -8,6 +8,7 @@ import { InfinityIcon } from '@/components/ui';
 import { useDatepicker } from '@/hooks/useDatepicker';
 import type { NodeRecord } from '@/api/queries/useNodesQuery';
 import { coerceInboundJsonField } from '@/models/dbinbound';
+import { isSnell } from '@/lib/xray/inbound-link';
 
 import { RowActionsCell } from './RowActions';
 import { SPEED_COLUMN_WIDTH, SPEED_TAG_CLASS_NAME, SPEED_TAG_STYLE } from '@/components/utility/speedTagStyle';
@@ -63,7 +64,7 @@ export function useInboundColumns({
     };
 
     const clientTotal = (record: DBInboundRecord) => (
-      (clientCount[record.id] || fallbackClientCount(record))?.clients ?? 0
+      isSnell(record.protocol) ? 0 : (clientCount[record.id] || fallbackClientCount(record))?.clients ?? 0
     );
 
     const speedTotal = (record: DBInboundRecord) => {
@@ -199,6 +200,16 @@ export function useInboundColumns({
         sorter: (a, b) => compareText(a.protocol, b.protocol),
         render: (_, record) => {
           const tags: ReactElement[] = [<Tag key="p" color="purple">{record.protocol}</Tag>];
+          if (isSnell(record.protocol) && record.runtimeStatus) {
+            tags.push(
+              <Tag key="runtime" color={record.runtimeStatus.running ? 'green' : 'red'}>
+                {record.runtimeStatus.running ? 'running' : 'stopped'}
+              </Tag>,
+            );
+            if (record.runtimeStatus.errorCategory) {
+              tags.push(<Tag key="runtime-error" color="red">{record.runtimeStatus.errorCategory}</Tag>);
+            }
+          }
           if (record.isWireguard || record.isHysteria) {
             tags.push(<Tag key="n" color="green">UDP</Tag>);
           } else if (record.isSS) {
@@ -227,6 +238,7 @@ export function useInboundColumns({
         width: 200,
         sorter: (a, b) => clientTotal(a) - clientTotal(b),
         render: (_, record) => {
+          if (isSnell(record.protocol)) return null;
           const cc = clientCount[record.id] || fallbackClientCount(record);
           if (!cc) return null;
           return (

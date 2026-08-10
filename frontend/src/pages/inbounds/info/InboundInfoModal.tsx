@@ -55,6 +55,7 @@ export default function InboundInfoModal({
   const [clientIpsArray, setClientIpsArray] = useState<string[]>([]);
   const [clientIpsText, setClientIpsText] = useState('');
   const [activeTab, setActiveTab] = useState('client');
+  const isSnellInbound = dbInbound?.protocol === Protocols.SNELL;
 
   const loadClientIps = useCallback(async () => {
     if (!clientStats?.email) return;
@@ -461,6 +462,39 @@ export default function InboundInfoModal({
           <dt>{t('pages.inbounds.port')}</dt>
           <dd><Tag>{dbInbound.port}</Tag></dd>
         </div>
+
+        {isSnellInbound && (
+          <>
+            <div className="info-row">
+              <dt>{t('status')}</dt>
+              <dd>
+                {dbInbound.runtimeStatus ? (
+                  <>
+                    <Tag color={dbInbound.runtimeStatus.running ? 'green' : 'red'}>
+                      {dbInbound.runtimeStatus.running ? 'running' : 'stopped'}
+                    </Tag>
+                    {dbInbound.runtimeStatus.errorCategory && (
+                      <Tag color="red">{dbInbound.runtimeStatus.errorCategory}</Tag>
+                    )}
+                  </>
+                ) : <Tag color="default">unknown</Tag>}
+              </dd>
+            </div>
+            <div className="info-row">
+              <dt>{t('pages.inbounds.traffic')}</dt>
+              <dd>
+                <Tag color={ColorUtils.usageColor((dbInbound.up ?? 0) + (dbInbound.down ?? 0), trafficDiff, dbInbound.total ?? 0)}>
+                  {SizeFormatter.sizeFormat((dbInbound.up ?? 0) + (dbInbound.down ?? 0))} /
+                  {' '}{(dbInbound.total ?? 0) > 0 ? SizeFormatter.sizeFormat(dbInbound.total ?? 0) : <InfinityIcon />}
+                </Tag>
+                <Tag>
+                  ↑ {SizeFormatter.sizeFormat(dbInbound.up ?? 0)} / {' '}
+                  {SizeFormatter.sizeFormat(dbInbound.down ?? 0)} ↓
+                </Tag>
+              </dd>
+            </div>
+          </>
+        )}
 
         {(dbInbound.isVMess || dbInbound.isVLess || dbInbound.isTrojan || dbInbound.isSS) && (
           <>

@@ -8,6 +8,7 @@ import {
   genAllLinks,
   genWireguardConfigs,
   genWireguardLinks,
+  isSnell,
   isPostQuantumLink,
   preferPublicHost,
 } from '@/lib/xray/inbound-link';
@@ -57,6 +58,14 @@ export default function QrCodeModal({
   useEffect(() => {
     if (!open || !dbInbound) return;
     const inbound = inboundFromDb(dbInbound);
+    if (isSnell(inbound.protocol)) {
+      setLinks([]);
+      setWireguardConfigs([]);
+      setWireguardLinks([]);
+      setSubLink('');
+      setSubJsonLink('');
+      return;
+    }
     const fallbackHostname = preferPublicHost(window.location.hostname, subSettings?.publicHost ?? '');
     if (inbound.protocol === Protocols.WIREGUARD) {
       const peerRemark = client?.email

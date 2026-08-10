@@ -1,4 +1,5 @@
 import type { NodeRecord } from '@/api/queries/useNodesQuery';
+import type { RuntimeStatus } from '@/models/dbinbound';
 
 export interface StreamHints {
   network: string;
@@ -33,6 +34,7 @@ export interface DBInboundRecord extends ProtocolFlags {
   nodeId?: number | null;
   settings: unknown;
   streamSettings: unknown;
+  runtimeStatus?: RuntimeStatus | null;
 }
 
 export interface ClientCountEntry {

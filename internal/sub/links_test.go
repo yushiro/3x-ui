@@ -3,7 +3,19 @@ package sub
 import (
 	"reflect"
 	"testing"
+
+	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
 )
+
+func TestLinksForInboundsOmitsSnell(t *testing.T) {
+	inbound := &model.Inbound{
+		Protocol: model.Snell,
+		Settings: `{"psk":"all-links-psk-must-not-escape","clients":[{"email":"snell@e"}]}`,
+	}
+	if got := NewLinkProvider().LinksForInbounds("sub.example.com", []*model.Inbound{inbound}); len(got) != 0 {
+		t.Fatalf("all-links exported Snell: %v", got)
+	}
+}
 
 func TestSplitLinkLines(t *testing.T) {
 	cases := []struct {

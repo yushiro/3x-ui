@@ -299,6 +299,9 @@ func (s *SubService) getSubs(subId string) ([]string, []string, int64, xray.Clie
 
 	seenEmails := make(map[string]struct{})
 	for _, inbound := range inbounds {
+		if isSnellInbound(inbound) {
+			continue
+		}
 		clients := s.matchingClients(inbound, subId)
 		if len(clients) == 0 {
 			continue
@@ -350,6 +353,9 @@ func (s *SubService) getSubs(subId string) ([]string, []string, int64, xray.Clie
 // single subId. Dedups duplicate client JSON entries by email (#5134). Backs the
 // panel's "Export all inbound links" so it matches the client/QR pages.
 func (s *SubService) inboundLinks(inbound *model.Inbound) []string {
+	if isSnellInbound(inbound) {
+		return nil
+	}
 	clients, err := s.inboundService.GetClients(inbound)
 	if err != nil {
 		return nil
@@ -606,6 +612,9 @@ func mergeStreamFromMaster(childStream, masterStream string) string {
 // (socks, http, mixed, wireguard, dokodemo, tunnel). The returned string may
 // contain multiple `\n`-separated URLs when the inbound has externalProxy set.
 func (s *SubService) GetLink(inbound *model.Inbound, email string) string {
+	if isSnellInbound(inbound) {
+		return ""
+	}
 	switch inbound.Protocol {
 	case "vmess":
 		return s.genVmessLink(inbound, email)
@@ -623,6 +632,10 @@ func (s *SubService) GetLink(inbound *model.Inbound, email string) string {
 		return s.genWireguardLink(inbound, email)
 	}
 	return ""
+}
+
+func isSnellInbound(inbound *model.Inbound) bool {
+	return inbound != nil && inbound.Protocol == model.Snell
 }
 
 // genWireguardLink builds a per-client wireguard:// share link mirroring the

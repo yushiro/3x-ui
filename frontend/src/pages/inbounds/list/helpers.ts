@@ -1,4 +1,5 @@
 import { isSSMultiUser } from '@/lib/xray/protocol-capabilities';
+import { isSnell } from '@/lib/xray/inbound-link';
 import { coerceInboundJsonField } from '@/models/dbinbound';
 
 import type { DBInboundRecord, StreamHints } from './types';
@@ -67,6 +68,7 @@ export function readSettings(settings: unknown): { method?: string; network?: st
 }
 
 export function isInboundMultiUser(record: { protocol: string; settings: unknown }): boolean {
+  if (isSnell(record.protocol)) return false;
   switch (record.protocol) {
     case 'vmess':
     case 'vless':
@@ -83,6 +85,7 @@ export function isInboundMultiUser(record: { protocol: string; settings: unknown
 }
 
 export function showQrCodeMenu(dbInbound: DBInboundRecord): boolean {
+  if (isSnell(dbInbound.protocol)) return false;
   if (dbInbound.isSS) {
     return !isSSMultiUser({ protocol: 'shadowsocks', settings: readSettings(dbInbound.settings) });
   }

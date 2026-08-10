@@ -1,4 +1,5 @@
 import { Base64, Wireguard } from '@/utils';
+import { Protocols } from '@/schemas/primitives';
 
 import type { Inbound } from '@/schemas/api/inbound';
 import type { VlessClient } from '@/schemas/protocols/inbound/vless';
@@ -24,6 +25,17 @@ import { deriveSpiderX } from './spider-x';
 
 type ForceTls = 'same' | 'tls' | 'none';
 const SHARE_HOSTNAME_RE = /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/;
+
+// Snell v5 has no standard URI, QR, subscription, or client-management
+// representation. Its sole user-facing output is the explicit Surge v5 copy
+// control in SnellFields.
+export function isSnell(protocol: string): boolean {
+  return protocol === Protocols.SNELL;
+}
+
+export function hasSnellSurgeCopy(protocol: string): boolean {
+  return isSnell(protocol);
+}
 
 // Format a host for interpolation into a URL authority. IPv6 literals are
 // wrapped in square brackets per RFC 3986; IPv4 and hostnames are left as-is.
@@ -1066,6 +1078,8 @@ function clientSubKey(client: ClientShape): string {
 
 export function getInboundClients(inbound: Inbound): ClientShape[] | null {
   switch (inbound.protocol) {
+    case 'snell':
+      return null;
     case 'vmess':
       return (inbound.settings.clients ?? []) as ClientShape[];
     case 'vless':
@@ -1102,6 +1116,8 @@ export interface GenLinkInput {
 export function genLink(input: GenLinkInput): string {
   const { inbound, address, port = inbound.port, forceTls = 'same', remark = '', client, externalProxy = null } = input;
   switch (inbound.protocol) {
+    case 'snell':
+      return '';
     case 'vmess':
       return genVmessLink({
         inbound, address, port, forceTls, remark,
@@ -1171,6 +1187,8 @@ export function genAllLinks(input: GenAllLinksInput): GenAllLinksEntry[] {
     fallbackHostname,
   } = input;
 
+  if (isSnell(inbound.protocol)) return [];
+
   const addr = resolveAddr(inbound, hostOverride, fallbackHostname);
   const port = inbound.port;
 
@@ -1218,6 +1236,7 @@ export function genInboundLinks(input: GenInboundLinksInput): string {
     hostOverride = '',
     fallbackHostname,
   } = input;
+  if (isSnell(inbound.protocol)) return '';
   const addr = resolveAddr(inbound, hostOverride, fallbackHostname);
   const clients = getInboundClients(inbound);
   if (clients) {

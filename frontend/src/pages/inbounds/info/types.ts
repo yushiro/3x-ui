@@ -69,6 +69,10 @@ export interface DBInboundLike {
   streamSettings: unknown;
   sniffing: unknown;
   clientStats?: ClientStats[];
+  up?: number;
+  down?: number;
+  total?: number;
+  runtimeStatus?: { running: boolean; errorCategory?: string } | null;
 }
 
 export interface InboundInfoModalProps {
