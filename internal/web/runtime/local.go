@@ -48,6 +48,15 @@ func (l *Local) ResetSnellTraffic(ctx context.Context, id int) error {
 	return l.deps.Snell.ResetTraffic(ctx, id)
 }
 
+// BeginSnellLifecycle keeps a complete service-level transition for one
+// inbound together, including its database update and zero-seed restart.
+func (l *Local) BeginSnellLifecycle(ctx context.Context, id int) (context.Context, func(), error) {
+	if l.deps.Snell == nil {
+		return ctx, nil, errors.New("Snell runtime is unavailable")
+	}
+	return l.deps.Snell.BeginLifecycle(ctx, id)
+}
+
 // CheckSnellHost validates Host-only prerequisites before an enabled CRUD
 // transition is committed.
 func (l *Local) CheckSnellHost(ctx context.Context) error {

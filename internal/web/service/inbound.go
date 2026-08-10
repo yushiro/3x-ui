@@ -1157,12 +1157,17 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 	var ib model.Inbound
 	loadErr := db.Model(model.Inbound{}).Where("id = ?", id).First(&ib).Error
 	if loadErr == nil && ib.Protocol == model.Snell && ib.NodeID == nil {
+		lifecycleCtx, release, err := s.beginSnellLifecycle(context.Background(), &ib)
+		if err != nil {
+			return false, err
+		}
+		defer release()
 		if ib.Enable {
-			counters, err := s.stopAndReadSnellTraffic(context.Background(), &ib)
+			counters, err := s.stopAndReadSnellTraffic(lifecycleCtx, &ib)
 			if err != nil {
 				return false, err
 			}
-			if err := s.syncSnellCounters(context.Background(), &ib, counters); err != nil {
+			if err := s.syncSnellCounters(lifecycleCtx, &ib, counters); err != nil {
 				return false, err
 			}
 			ib.Up = max(ib.Up, counters.UpBytes)
@@ -1172,7 +1177,7 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if err := rt.DelInbound(context.Background(), &ib); err != nil {
+		if err := rt.DelInbound(lifecycleCtx, &ib); err != nil {
 			return false, err
 		}
 	} else if loadErr == nil {
@@ -1417,21 +1422,10 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		return inbound, false, err
 	}
 	localSnellUpdate := oldInbound.Protocol == model.Snell && oldInbound.NodeID == nil && inbound.Protocol == model.Snell
-	if localSnellUpdate && inbound.Enable {
+	if inbound.Protocol == model.Snell && inbound.NodeID == nil && inbound.Enable {
 		if err := s.checkSnellHost(context.Background(), inbound); err != nil {
 			return inbound, false, err
 		}
-	}
-	if localSnellUpdate && oldInbound.Enable {
-		counters, err := s.stopAndReadSnellTraffic(context.Background(), oldInbound)
-		if err != nil {
-			return inbound, false, err
-		}
-		if err := s.syncSnellCounters(context.Background(), oldInbound, counters); err != nil {
-			return inbound, false, err
-		}
-		oldInbound.Up = max(oldInbound.Up, counters.UpBytes)
-		oldInbound.Down = max(oldInbound.Down, counters.DownBytes)
 	}
 	conflict, err := s.checkPortConflict(inbound, inbound.Id)
 	if err != nil {
@@ -1448,6 +1442,40 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	oldRoutedMtproto := mtprotoRoutesThroughXray(oldInbound)
 	if err := s.normalizeMtprotoXrayPort(inbound, oldInbound.Settings); err != nil {
 		return inbound, false, err
+	}
+	if strings.TrimSpace(inbound.ShareAddrStrategy) != "" {
+		if err := normalizeInboundShareAddressStrict(inbound); err != nil {
+			return inbound, false, err
+		}
+	}
+
+	// Acquire the sidecar boundary only after all DB-independent checks have
+	// passed. A reset keeps this same boundary through its database zero and
+	// zero-seed restart, so refresh the persisted snapshot before closing the
+	// final accounting window.
+	runtimeCtx := context.Background()
+	if localSnellUpdate {
+		var release func()
+		runtimeCtx, release, err = s.beginSnellLifecycle(runtimeCtx, inbound)
+		if err != nil {
+			return inbound, false, err
+		}
+		defer release()
+		oldInbound, err = s.GetInbound(inbound.Id)
+		if err != nil {
+			return inbound, false, err
+		}
+		if oldInbound.Enable {
+			counters, err := s.stopAndReadSnellTraffic(runtimeCtx, oldInbound)
+			if err != nil {
+				return inbound, false, err
+			}
+			if err := s.syncSnellCounters(runtimeCtx, oldInbound, counters); err != nil {
+				return inbound, false, err
+			}
+			oldInbound.Up = max(oldInbound.Up, counters.UpBytes)
+			oldInbound.Down = max(oldInbound.Down, counters.DownBytes)
+		}
 	}
 
 	tag := oldInbound.Tag
@@ -1584,7 +1612,7 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 					if !payload.Enable {
 						return
 					}
-					if err2 := rt.AddInbound(context.Background(), payload); err2 != nil {
+					if err2 := rt.AddInbound(runtimeCtx, payload); err2 != nil {
 						logger.Debug("Unable to update Snell inbound on", rt.Name(), ":", err2)
 						needRestart = true
 					}

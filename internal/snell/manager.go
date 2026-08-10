@@ -64,6 +64,9 @@ type Manager struct {
 	mu   sync.Mutex
 	byID map[int]*entry
 
+	lifecycleMu sync.Mutex
+	lifecycles  map[int]*sync.Mutex
+
 	now      func() time.Time
 	schedule func(time.Duration, func())
 	swept    bool
@@ -78,6 +81,7 @@ func NewManager(launch ProcessLauncher, host HostChecker, nft *NftManager, binar
 		BinaryPath: binary,
 		ConfigDir:  configDir,
 		byID:       make(map[int]*entry),
+		lifecycles: make(map[int]*sync.Mutex),
 		now:        time.Now,
 		schedule: func(delay time.Duration, fn func()) {
 			time.AfterFunc(delay, fn)
@@ -85,13 +89,55 @@ func NewManager(launch ProcessLauncher, host HostChecker, nft *NftManager, binar
 	}
 }
 
+type lifecycleContextKey struct{}
+
+type lifecycleToken struct {
+	manager *Manager
+	id      int
+}
+
+// BeginLifecycle serializes a complete local sidecar transition for one
+// inbound. The returned context lets nested Manager calls reuse the same
+// boundary instead of self-deadlocking.
+func (m *Manager) BeginLifecycle(ctx context.Context, id int) (context.Context, func(), error) {
+	if m == nil || id <= 0 {
+		return ctx, nil, errors.New("invalid Snell inbound id")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if token, ok := ctx.Value(lifecycleContextKey{}).(lifecycleToken); ok && token.manager == m && token.id == id {
+		return ctx, func() {}, nil
+	}
+	m.lifecycleMu.Lock()
+	lock := m.lifecycles[id]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		m.lifecycles[id] = lock
+	}
+	m.lifecycleMu.Unlock()
+	lock.Lock()
+	return context.WithValue(ctx, lifecycleContextKey{}, lifecycleToken{manager: m, id: id}), lock.Unlock, nil
+}
+
+func (m *Manager) withLifecycle(ctx context.Context, id int, fn func(context.Context) error) error {
+	ctx, release, err := m.BeginLifecycle(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return fn(ctx)
+}
+
 // Ensure starts the desired sidecar when it is enabled and below quota. A
 // changed active instance is stopped before its final absolute counters seed
 // the replacement's nft rules.
 func (m *Manager) Ensure(ctx context.Context, instance Instance) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.ensureLocked(ctx, instance)
+	return m.withLifecycle(ctx, instance.ID, func(ctx context.Context) error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.ensureLocked(ctx, instance)
+	})
 }
 
 func (m *Manager) ensureLocked(ctx context.Context, instance Instance) error {
@@ -176,9 +222,11 @@ func (m *Manager) ensureLocked(ctx context.Context, instance Instance) error {
 // Stop stops one managed process. Intentional stops, including disable and
 // quota actions, never schedule a restart after their Wait returns.
 func (m *Manager) Stop(ctx context.Context, id int, intentional bool) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.stopLocked(ctx, id, intentional)
+	return m.withLifecycle(ctx, id, func(ctx context.Context) error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.stopLocked(ctx, id, intentional)
+	})
 }
 
 func (m *Manager) stopLocked(ctx context.Context, id int, intentional bool) error {
@@ -202,21 +250,23 @@ func (m *Manager) stopLocked(ctx context.Context, id int, intentional bool) erro
 
 // Remove stops the sidecar and removes only its owned config and nft objects.
 func (m *Manager) Remove(ctx context.Context, id int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.stopLocked(ctx, id, true); err != nil {
-		return err
-	}
-	if m.Nft != nil {
-		if err := m.Nft.RemoveInbound(ctx, id); err != nil {
+	return m.withLifecycle(ctx, id, func(ctx context.Context) error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if err := m.stopLocked(ctx, id, true); err != nil {
 			return err
 		}
-	}
-	delete(m.byID, id)
-	if err := os.Remove(m.configPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
+		if m.Nft != nil {
+			if err := m.Nft.RemoveInbound(ctx, id); err != nil {
+				return err
+			}
+		}
+		delete(m.byID, id)
+		if err := os.Remove(m.configPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	})
 }
 
 // Reconcile stops no-longer-desired sidecars then converges the desired set.
@@ -226,43 +276,36 @@ func (m *Manager) Reconcile(ctx context.Context, desired []Instance) error {
 		want[instance.ID] = true
 	}
 	m.mu.Lock()
+	stale := make([]int, 0)
 	for id := range m.byID {
-		if want[id] {
-			continue
-		}
-		if err := m.stopLocked(ctx, id, true); err != nil {
-			m.mu.Unlock()
-			return err
-		}
-		if m.Nft != nil {
-			if err := m.Nft.RemoveInbound(ctx, id); err != nil {
-				m.mu.Unlock()
-				return err
-			}
-		}
-		delete(m.byID, id)
-		_ = os.Remove(m.configPath(id))
-	}
-	// nft counters are absolute and must never regress below their database
-	// seed. A missing or lower counter means the process is stopped first; the
-	// subsequent Ensure recreates the named counters from the persisted values.
-	for _, instance := range desired {
-		cur := m.byID[instance.ID]
-		if cur == nil || cur.process == nil || !cur.process.Running() || !instanceShouldRun(instance) || m.Nft == nil {
-			continue
-		}
-		counters, err := m.Nft.Read(ctx, instance.ID)
-		if err == nil && counters.UpBytes >= instance.Up && counters.DownBytes >= instance.Down {
-			continue
-		}
-		if err := m.stopLocked(ctx, instance.ID, true); err != nil {
-			m.mu.Unlock()
-			return err
+		if !want[id] {
+			stale = append(stale, id)
 		}
 	}
 	m.mu.Unlock()
+	for _, id := range stale {
+		if err := m.Remove(ctx, id); err != nil {
+			return err
+		}
+	}
 	for _, instance := range desired {
-		if err := m.Ensure(ctx, instance); err != nil {
+		if err := m.withLifecycle(ctx, instance.ID, func(ctx context.Context) error {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			// nft counters are absolute and must never regress below their database
+			// seed. A missing or lower counter means the process is stopped first;
+			// Ensure then recreates named counters from the persisted values.
+			cur := m.byID[instance.ID]
+			if cur != nil && cur.process != nil && cur.process.Running() && instanceShouldRun(instance) && m.Nft != nil {
+				counters, err := m.Nft.Read(ctx, instance.ID)
+				if err != nil || counters.UpBytes < instance.Up || counters.DownBytes < instance.Down {
+					if err := m.stopLocked(ctx, instance.ID, true); err != nil {
+						return err
+					}
+				}
+			}
+			return m.ensureLocked(ctx, instance)
+		}); err != nil {
 			return err
 		}
 	}
@@ -271,12 +314,18 @@ func (m *Manager) Reconcile(ctx context.Context, desired []Instance) error {
 
 // ReadTraffic returns the private absolute counters for one sidecar.
 func (m *Manager) ReadTraffic(ctx context.Context, id int) (Counters, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.Nft == nil {
-		return Counters{}, errors.New("Snell nft manager is unavailable")
-	}
-	return m.Nft.Read(ctx, id)
+	var counters Counters
+	err := m.withLifecycle(ctx, id, func(ctx context.Context) error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.Nft == nil {
+			return errors.New("Snell nft manager is unavailable")
+		}
+		var err error
+		counters, err = m.Nft.Read(ctx, id)
+		return err
+	})
+	return counters, err
 }
 
 // HandleExit records an unexpected exit and schedules the bounded restart.
@@ -366,22 +415,24 @@ func (m *Manager) CheckHost(ctx context.Context) error {
 
 // ResetTraffic resets the private nft counters for one managed inbound.
 func (m *Manager) ResetTraffic(ctx context.Context, id int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.Nft == nil {
-		return errors.New("Snell nft manager is unavailable")
-	}
-	if err := m.stopLocked(ctx, id, true); err != nil {
-		return err
-	}
-	if err := m.Nft.ResetInbound(ctx, id); err != nil {
-		return err
-	}
-	if cur := m.byID[id]; cur != nil {
-		cur.instance.Up = 0
-		cur.instance.Down = 0
-	}
-	return nil
+	return m.withLifecycle(ctx, id, func(ctx context.Context) error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.Nft == nil {
+			return errors.New("Snell nft manager is unavailable")
+		}
+		if err := m.stopLocked(ctx, id, true); err != nil {
+			return err
+		}
+		if err := m.Nft.ResetInbound(ctx, id); err != nil {
+			return err
+		}
+		if cur := m.byID[id]; cur != nil {
+			cur.instance.Up = 0
+			cur.instance.Down = 0
+		}
+		return nil
+	})
 }
 
 func (m *Manager) configPath(id int) string {

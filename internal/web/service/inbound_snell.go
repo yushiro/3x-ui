@@ -73,6 +73,20 @@ func (s *InboundService) checkSnellHost(ctx context.Context, inbound *model.Inbo
 	return checker.CheckSnellHost(ctx)
 }
 
+func (s *InboundService) beginSnellLifecycle(ctx context.Context, inbound *model.Inbound) (context.Context, func(), error) {
+	rt, err := s.snellRuntimeFor(inbound)
+	if err != nil {
+		return ctx, nil, err
+	}
+	lifecycle, ok := rt.(interface {
+		BeginSnellLifecycle(context.Context, int) (context.Context, func(), error)
+	})
+	if !ok {
+		return ctx, nil, errors.New("Snell runtime is unavailable")
+	}
+	return lifecycle.BeginSnellLifecycle(ctx, inbound.Id)
+}
+
 // stopAndReadSnellTraffic closes the accounting window before a lifecycle
 // change, then returns the final absolute counters for the same inbound.
 func (s *InboundService) stopAndReadSnellTraffic(ctx context.Context, inbound *model.Inbound) (snell.Counters, error) {
@@ -80,7 +94,9 @@ func (s *InboundService) stopAndReadSnellTraffic(ctx context.Context, inbound *m
 	if err != nil {
 		return snell.Counters{}, err
 	}
-	stopper, ok := rt.(interface{ StopSnell(context.Context, int) error })
+	stopper, ok := rt.(interface {
+		StopSnell(context.Context, int) error
+	})
 	if !ok {
 		return snell.Counters{}, errors.New("Snell runtime is unavailable")
 	}
@@ -102,6 +118,14 @@ func (s *InboundService) setSnellEnable(inbound *model.Inbound, enable bool) (bo
 		if err := s.checkSnellHost(ctx, inbound); err != nil {
 			return false, err
 		}
+	}
+	lifecycleCtx, release, err := s.beginSnellLifecycle(ctx, inbound)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	ctx = lifecycleCtx
+	if enable {
 		if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", inbound.Id).Update("enable", true).Error; err != nil {
 			return false, err
 		}
@@ -286,6 +310,12 @@ func (s *InboundService) ResetSnellTraffic(ctx context.Context, id int, monthly 
 	if !ok {
 		return errors.New("Snell runtime is unavailable")
 	}
+	lifecycleCtx, release, err := s.beginSnellLifecycle(ctx, &inbound)
+	if err != nil {
+		return err
+	}
+	defer release()
+	ctx = lifecycleCtx
 	if err := local.ResetSnellTraffic(ctx, id); err != nil {
 		if inbound.Enable {
 			if rt, runtimeErr := s.snellRuntimeFor(&inbound); runtimeErr == nil {
