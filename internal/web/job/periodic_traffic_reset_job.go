@@ -59,7 +59,7 @@ func (j *PeriodicTrafficResetJob) Run() {
 
 	resetCount := 0
 	for _, inbound := range inbounds {
-		resetInboundErr := j.inboundService.ResetInboundTraffic(inbound.Id)
+		resetInboundErr := j.inboundService.ResetInboundTrafficForPeriod(inbound.Id, j.period == "monthly")
 		if resetInboundErr != nil {
 			logger.Warning("Failed to reset traffic for inbound", inbound.Id, ":", resetInboundErr)
 		}

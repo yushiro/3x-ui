@@ -237,6 +237,23 @@ func (m *Manager) Reconcile(ctx context.Context, desired []Instance) error {
 		delete(m.byID, id)
 		_ = os.Remove(m.configPath(id))
 	}
+	// nft counters are absolute and must never regress below their database
+	// seed. A missing or lower counter means the process is stopped first; the
+	// subsequent Ensure recreates the named counters from the persisted values.
+	for _, instance := range desired {
+		cur := m.byID[instance.ID]
+		if cur == nil || cur.process == nil || !cur.process.Running() || !instanceShouldRun(instance) || m.Nft == nil {
+			continue
+		}
+		counters, err := m.Nft.Read(ctx, instance.ID)
+		if err == nil && counters.UpBytes >= instance.Up && counters.DownBytes >= instance.Down {
+			continue
+		}
+		if err := m.stopLocked(ctx, instance.ID, true); err != nil {
+			m.mu.Unlock()
+			return err
+		}
+	}
 	m.mu.Unlock()
 	for _, instance := range desired {
 		if err := m.Ensure(ctx, instance); err != nil {
@@ -244,6 +261,16 @@ func (m *Manager) Reconcile(ctx context.Context, desired []Instance) error {
 		}
 	}
 	return nil
+}
+
+// ReadTraffic returns the private absolute counters for one sidecar.
+func (m *Manager) ReadTraffic(ctx context.Context, id int) (Counters, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Nft == nil {
+		return Counters{}, errors.New("Snell nft manager is unavailable")
+	}
+	return m.Nft.Read(ctx, id)
 }
 
 // HandleExit records an unexpected exit and schedules the bounded restart.

@@ -110,14 +110,47 @@ func snellErrorCategory(message string) string {
 	}
 }
 
+func (s *InboundService) ReconcileSnell(ctx context.Context, desired []snell.Instance) error {
+	if runtime.GetManager() == nil {
+		return errors.New("Snell runtime is unavailable")
+	}
+	local, ok := runtime.GetManager().Local().(interface {
+		ReconcileSnell(context.Context, []snell.Instance) error
+	})
+	if !ok {
+		return errors.New("Snell runtime is unavailable")
+	}
+	return local.ReconcileSnell(ctx, desired)
+}
+
+func (s *InboundService) ReadSnellCounters(ctx context.Context, id int) (snell.Counters, error) {
+	if runtime.GetManager() == nil {
+		return snell.Counters{}, errors.New("Snell runtime is unavailable")
+	}
+	local, ok := runtime.GetManager().Local().(interface {
+		ReadSnellCounters(context.Context, int) (snell.Counters, error)
+	})
+	if !ok {
+		return snell.Counters{}, errors.New("Snell runtime is unavailable")
+	}
+	return local.ReadSnellCounters(ctx, id)
+}
+
 // SyncSnellCounters persists absolute nft counters without allowing a delayed
 // lower read to roll back traffic already recorded in the database.
-func (s *InboundService) SyncSnellCounters(ctx context.Context, inbound *model.Inbound, counters snell.Counters) error {
+func (s *InboundService) SyncSnellCounters(ctx context.Context, id int, counters snell.Counters) error {
+	inbound, err := s.GetInbound(id)
+	if err != nil {
+		return err
+	}
+	return s.syncSnellCounters(ctx, inbound, counters)
+}
+
+func (s *InboundService) syncSnellCounters(_ context.Context, inbound *model.Inbound, counters snell.Counters) error {
 	if inbound == nil || inbound.Protocol != model.Snell || inbound.NodeID != nil || counters.UpBytes < 0 || counters.DownBytes < 0 {
 		return errors.New("invalid Snell counter sync")
 	}
-	var stop bool
-	err := submitTrafficWrite(func() error {
+	return submitTrafficWrite(func() error {
 		return database.GetDB().Transaction(func(tx *gorm.DB) error {
 			updates := map[string]any{
 				"up":   gorm.Expr("CASE WHEN up > ? THEN up ELSE ? END", counters.UpBytes, counters.UpBytes),
@@ -126,23 +159,33 @@ func (s *InboundService) SyncSnellCounters(ctx context.Context, inbound *model.I
 			if err := tx.Model(&model.Inbound{}).Where("id = ?", inbound.Id).Updates(updates).Error; err != nil {
 				return err
 			}
-			var persisted model.Inbound
-			if err := tx.Select("id", "up", "down", "total", "enable").First(&persisted, inbound.Id).Error; err != nil {
-				return err
-			}
-			if persisted.Total > 0 && persisted.Up+persisted.Down >= persisted.Total && persisted.Enable {
-				if err := tx.Model(&model.Inbound{}).Where("id = ?", inbound.Id).Update("enable", false).Error; err != nil {
-					return err
-				}
-				stop = true
-			}
 			return nil
 		})
+	})
+}
+
+// EnforceSnellQuota disables and stops only the depleted local sidecar. An
+// unlimited (total=0) inbound is deliberately untouched.
+func (s *InboundService) EnforceSnellQuota(ctx context.Context, id int) error {
+	var inbound model.Inbound
+	if err := database.GetDB().First(&inbound, id).Error; err != nil {
+		return err
+	}
+	if inbound.Protocol != model.Snell || inbound.NodeID != nil {
+		return errors.New("invalid Snell quota enforcement")
+	}
+	var stop bool
+	err := submitTrafficWrite(func() error {
+		result := database.GetDB().Model(&model.Inbound{}).
+			Where("id = ? AND enable = ? AND total > 0 AND up + down >= total", id, true).
+			Update("enable", false)
+		stop = result.RowsAffected > 0
+		return result.Error
 	})
 	if err != nil || !stop {
 		return err
 	}
-	rt, err := s.snellRuntimeFor(inbound)
+	rt, err := s.snellRuntimeFor(&inbound)
 	if err != nil {
 		return err
 	}
@@ -151,14 +194,23 @@ func (s *InboundService) SyncSnellCounters(ctx context.Context, inbound *model.I
 	}); ok {
 		return local.StopSnell(ctx, inbound.Id)
 	}
-	return rt.DelInbound(ctx, inbound)
+	return rt.DelInbound(ctx, &inbound)
 }
 
-func (s *InboundService) ResetSnellTraffic(ctx context.Context, id int, resetCounters bool) error {
+func (s *InboundService) ResetSnellTraffic(ctx context.Context, id int, monthly bool) error {
+	var inbound model.Inbound
 	err := submitTrafficWrite(func() error {
-		return database.GetDB().Model(&model.Inbound{}).Where("id = ? AND protocol = ? AND node_id IS NULL", id, model.Snell).Updates(map[string]any{"up": 0, "down": 0}).Error
+		if err := database.GetDB().Where("id = ? AND protocol = ? AND node_id IS NULL", id, model.Snell).First(&inbound).Error; err != nil {
+			return err
+		}
+		updates := map[string]any{"up": 0, "down": 0}
+		if monthly {
+			updates["enable"] = true
+			inbound.Enable = true
+		}
+		return database.GetDB().Model(&model.Inbound{}).Where("id = ?", id).Updates(updates).Error
 	})
-	if err != nil || !resetCounters || runtime.GetManager() == nil {
+	if err != nil || runtime.GetManager() == nil {
 		return err
 	}
 	local, ok := runtime.GetManager().Local().(interface {
@@ -167,5 +219,18 @@ func (s *InboundService) ResetSnellTraffic(ctx context.Context, id int, resetCou
 	if !ok {
 		return errors.New("Snell runtime is unavailable")
 	}
-	return local.ResetSnellTraffic(ctx, id)
+	if err := local.ResetSnellTraffic(ctx, id); err != nil {
+		return err
+	}
+	if !monthly {
+		return nil
+	}
+	if _, err := snell.InstanceFromInbound(&inbound); err != nil {
+		return err
+	}
+	rt, err := s.snellRuntimeFor(&inbound)
+	if err != nil {
+		return err
+	}
+	return rt.AddInbound(ctx, &inbound)
 }

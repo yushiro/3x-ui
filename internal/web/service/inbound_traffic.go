@@ -740,12 +740,30 @@ func (s *InboundService) propagateResetAllTrafficsToNodes() {
 }
 
 func (s *InboundService) ResetInboundTraffic(id int) error {
+	return s.resetInboundTrafficForPeriod(id, false)
+}
+
+// ResetInboundTrafficForPeriod is used by the scheduler to preserve the public
+// manual-reset API while monthly Snell resets re-enable valid sidecars.
+func (s *InboundService) ResetInboundTrafficForPeriod(id int, monthly bool) error {
+	return s.resetInboundTrafficForPeriod(id, monthly)
+}
+
+func (s *InboundService) resetInboundTrafficForPeriod(id int, monthly bool) error {
 	inbound, err := s.GetInbound(id)
 	if err != nil {
 		return err
 	}
 	if inbound.Protocol == model.Snell && inbound.NodeID == nil {
-		return s.ResetSnellTraffic(context.Background(), id, true)
+		return s.ResetSnellTraffic(context.Background(), id, monthly)
+	}
+	return s.resetExistingInboundTraffic(id)
+}
+
+func (s *InboundService) resetExistingInboundTraffic(id int) error {
+	inbound, err := s.GetInbound(id)
+	if err != nil {
+		return err
 	}
 	if err := submitTrafficWrite(func() error {
 		return database.GetDB().Model(model.Inbound{}).

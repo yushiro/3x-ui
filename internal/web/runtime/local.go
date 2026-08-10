@@ -56,6 +56,22 @@ func (l *Local) StopSnell(ctx context.Context, id int) error {
 	return l.deps.Snell.Stop(ctx, id, true)
 }
 
+// ReconcileSnell converges the local sidecar set without affecting Xray.
+func (l *Local) ReconcileSnell(ctx context.Context, desired []snell.Instance) error {
+	if l.deps.Snell == nil {
+		return errors.New("Snell runtime is unavailable")
+	}
+	return l.deps.Snell.Reconcile(ctx, desired)
+}
+
+// ReadSnellCounters returns absolute nft totals for one sidecar.
+func (l *Local) ReadSnellCounters(ctx context.Context, id int) (snell.Counters, error) {
+	if l.deps.Snell == nil {
+		return snell.Counters{}, errors.New("Snell runtime is unavailable")
+	}
+	return l.deps.Snell.ReadTraffic(ctx, id)
+}
+
 func (l *Local) withAPI(fn func(api *xray.XrayAPI) error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

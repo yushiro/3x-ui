@@ -143,6 +143,24 @@ func TestManagerQuotaStopAndCrashBackoff(t *testing.T) {
 	}
 }
 
+func TestManagerReconcileRepairsLowerCountersByStoppingBeforeRestart(t *testing.T) {
+	launch := &fakeLauncher{}
+	nft, exec := testNft(`{"nftables":[]}`)
+	m := NewManager(launch, fakeHost{}, nft, "/bin/snell-server", t.TempDir())
+	instance := testInstance(8)
+	instance.Up, instance.Down = 100, 200
+	if err := m.Ensure(context.Background(), instance); err != nil {
+		t.Fatal(err)
+	}
+	exec.output = []byte(`{"nftables":[{"counter":{"name":"snell_8_up","bytes":50}},{"counter":{"name":"snell_8_down","bytes":150}}]}`)
+	if err := m.Reconcile(context.Background(), []Instance{instance}); err != nil {
+		t.Fatal(err)
+	}
+	if launch.procs[0].stops != 1 || len(launch.starts) != 2 {
+		t.Fatalf("lower counters were not repaired by stop/restart: stops=%d starts=%d", launch.procs[0].stops, len(launch.starts))
+	}
+}
+
 func TestManagerResetsOnlyInboundCounters(t *testing.T) {
 	launch := &fakeLauncher{}
 	nft, exec := testNft(`{"nftables":[]}`)

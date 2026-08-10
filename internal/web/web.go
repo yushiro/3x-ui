@@ -329,6 +329,10 @@ func (s *Server) startTask(restartXray bool, loc *time.Location) {
 	_, _ = s.cron.AddJob(cadenceMtproto, mtJob)
 	go mtJob.Run()
 
+	snellJob := job.NewSnellJob(&s.inboundService, nil)
+	_, _ = s.cron.AddJob(cadenceMtproto, snellJob)
+	go snellJob.Run()
+
 	// check client ips from log file every 10 sec
 	_, _ = s.cron.AddJob(cadenceClientIPScan, job.NewCheckClientIpJob())
 
