@@ -235,6 +235,16 @@ func (s *InboundService) ReadSnellCounters(ctx context.Context, id int) (snell.C
 	return local.ReadSnellCounters(ctx, id)
 }
 
+// BeginSnellLifecycle lets the periodic collector keep an absolute read,
+// database sync, and quota decision inside one sidecar lifecycle boundary.
+func (s *InboundService) BeginSnellLifecycle(ctx context.Context, id int) (context.Context, func(), error) {
+	inbound, err := s.GetInbound(id)
+	if err != nil {
+		return ctx, nil, err
+	}
+	return s.beginSnellLifecycle(ctx, inbound)
+}
+
 // SyncSnellCounters persists absolute nft counters without allowing a delayed
 // lower read to roll back traffic already recorded in the database.
 func (s *InboundService) SyncSnellCounters(ctx context.Context, id int, counters snell.Counters) error {

@@ -13,6 +13,7 @@ import (
 type SnellRuntimeService interface {
 	DesiredSnellInstances() ([]snell.Instance, error)
 	ReconcileSnell(context.Context, []snell.Instance) error
+	BeginSnellLifecycle(context.Context, int) (context.Context, func(), error)
 	ReadSnellCounters(context.Context, int) (snell.Counters, error)
 	SyncSnellCounters(context.Context, int, snell.Counters) error
 	EnforceSnellQuota(context.Context, int) error
@@ -55,17 +56,24 @@ func (j *SnellJob) Run() {
 		return
 	}
 	for _, row := range rows {
-		counters, err := j.Runtime.ReadSnellCounters(ctx, row.ID)
-		if err != nil {
-			logger.Warning("snell job: read counters for inbound", row.ID, "failed:", err)
-			continue
-		}
-		if err := j.Runtime.SyncSnellCounters(ctx, row.ID, counters); err != nil {
-			logger.Warning("snell job: sync counters for inbound", row.ID, "failed:", err)
-			continue
-		}
-		if err := j.Runtime.EnforceSnellQuota(ctx, row.ID); err != nil {
-			logger.Warning("snell job: enforce quota for inbound", row.ID, "failed:", err)
+		if err := j.collectInbound(ctx, row.ID); err != nil {
+			logger.Warning("snell job: collect traffic for inbound", row.ID, "failed:", err)
 		}
 	}
+}
+
+func (j *SnellJob) collectInbound(ctx context.Context, id int) error {
+	ctx, release, err := j.Runtime.BeginSnellLifecycle(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer release()
+	counters, err := j.Runtime.ReadSnellCounters(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := j.Runtime.SyncSnellCounters(ctx, id, counters); err != nil {
+		return err
+	}
+	return j.Runtime.EnforceSnellQuota(ctx, id)
 }
