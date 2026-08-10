@@ -322,6 +322,16 @@ func (m *Manager) Status(id int) Status {
 	return Status{}
 }
 
+// ResetTraffic resets the private nft counters for one managed inbound.
+func (m *Manager) ResetTraffic(ctx context.Context, id int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.Nft == nil {
+		return errors.New("Snell nft manager is unavailable")
+	}
+	return m.Nft.ResetInbound(ctx, id)
+}
+
 func (m *Manager) configPath(id int) string {
 	return filepath.Join(m.ConfigDir, fmt.Sprintf("snell-%d.conf", id))
 }

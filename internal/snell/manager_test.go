@@ -143,6 +143,18 @@ func TestManagerQuotaStopAndCrashBackoff(t *testing.T) {
 	}
 }
 
+func TestManagerResetsOnlyInboundCounters(t *testing.T) {
+	launch := &fakeLauncher{}
+	nft, exec := testNft(`{"nftables":[]}`)
+	m := NewManager(launch, fakeHost{}, nft, "/bin/snell-server", t.TempDir())
+	if err := m.ResetTraffic(context.Background(), 9); err != nil {
+		t.Fatal(err)
+	}
+	if len(exec.calls) != 2 || strings.Join(exec.calls[0], " ") != "reset counter inet xui_snell snell_9_up" || strings.Join(exec.calls[1], " ") != "reset counter inet xui_snell snell_9_down" {
+		t.Fatalf("unexpected reset calls: %#v", exec.calls)
+	}
+}
+
 func TestManagerBackoffIsBoundedAndResettable(t *testing.T) {
 	backoff := NewBackoff()
 	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, time.Minute, time.Minute}

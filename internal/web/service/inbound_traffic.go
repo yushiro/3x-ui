@@ -740,6 +740,13 @@ func (s *InboundService) propagateResetAllTrafficsToNodes() {
 }
 
 func (s *InboundService) ResetInboundTraffic(id int) error {
+	inbound, err := s.GetInbound(id)
+	if err != nil {
+		return err
+	}
+	if inbound.Protocol == model.Snell && inbound.NodeID == nil {
+		return s.ResetSnellTraffic(context.Background(), id, true)
+	}
 	if err := submitTrafficWrite(func() error {
 		return database.GetDB().Model(model.Inbound{}).
 			Where("id = ?", id).
@@ -748,8 +755,7 @@ func (s *InboundService) ResetInboundTraffic(id int) error {
 		return err
 	}
 
-	inbound, err := s.GetInbound(id)
-	if err == nil && inbound != nil && inbound.NodeID != nil {
+	if inbound != nil && inbound.NodeID != nil {
 		if rt, rterr := s.runtimeFor(inbound); rterr == nil {
 			if e := rt.ResetInboundTraffic(context.Background(), inbound); e != nil {
 				logger.Warning("ResetInboundTraffic: remote propagation to", rt.Name(), "failed:", e)

@@ -26,6 +26,7 @@ func run(root, outDir string) error {
 			StructAllow: setOf(
 				"User",
 				"Inbound",
+				"InboundViewStatus",
 				"FallbackParentInfo",
 				"OutboundTraffics",
 				"InboundClientIps",

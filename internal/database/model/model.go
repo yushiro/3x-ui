@@ -85,6 +85,13 @@ type Inbound struct {
 	// the master's externally reachable endpoint instead of the child's
 	// loopback listen. Not persisted.
 	FallbackParent *FallbackParentInfo `json:"fallbackParent,omitempty" gorm:"-"`
+	RuntimeStatus  *InboundViewStatus  `json:"runtimeStatus,omitempty" gorm:"-"`
+}
+
+// InboundViewStatus is read-time sidecar state, never a database column.
+type InboundViewStatus struct {
+	Running       bool   `json:"running"`
+	ErrorCategory string `json:"errorCategory,omitempty"`
 }
 
 // FallbackParentInfo carries everything the frontend needs to rewrite a

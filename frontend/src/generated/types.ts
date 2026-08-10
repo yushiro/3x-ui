@@ -419,6 +419,7 @@ export interface Inbound {
   port: number;
   protocol: Protocol;
   remark: string;
+  runtimeStatus?: InboundViewStatus | null;
   settings: unknown;
   shareAddr: string;
   shareAddrStrategy: string;
@@ -468,6 +469,11 @@ export interface InboundOption {
   wgDns?: string;
   wgMtu?: number;
   wgPublicKey?: string;
+}
+
+export interface InboundViewStatus {
+  errorCategory?: string;
+  running: boolean;
 }
 
 export interface Msg {

@@ -31,6 +31,31 @@ func NewLocal(deps LocalDeps) *Local {
 
 func (l *Local) Name() string { return "local" }
 
+// SnellStatus exposes the injected local sidecar manager without adding it to
+// the Runtime interface used by remote panels.
+func (l *Local) SnellStatus(id int) snell.Status {
+	if l.deps.Snell == nil {
+		return snell.Status{}
+	}
+	return l.deps.Snell.Status(id)
+}
+
+// ResetSnellTraffic resets only the named sidecar counters for one inbound.
+func (l *Local) ResetSnellTraffic(ctx context.Context, id int) error {
+	if l.deps.Snell == nil {
+		return errors.New("Snell runtime is unavailable")
+	}
+	return l.deps.Snell.ResetTraffic(ctx, id)
+}
+
+// StopSnell stops one sidecar without deleting its owned counter objects.
+func (l *Local) StopSnell(ctx context.Context, id int) error {
+	if l.deps.Snell == nil {
+		return errors.New("Snell runtime is unavailable")
+	}
+	return l.deps.Snell.Stop(ctx, id, true)
+}
+
 func (l *Local) withAPI(fn func(api *xray.XrayAPI) error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -20,6 +20,11 @@ export interface FallbackParentRef {
     path: string;
 }
 
+export interface RuntimeStatus {
+    running: boolean;
+    errorCategory?: string;
+}
+
 export type DBInboundInit = Partial<{
     id: number;
     userId: number;
@@ -46,6 +51,7 @@ export type DBInboundInit = Partial<{
     subSortIndex: number;
     originNodeGuid: string;
     fallbackParent: FallbackParentRef | null;
+    runtimeStatus: RuntimeStatus | null;
 }>;
 
 export function coerceInboundJsonField(value: unknown): Record<string, unknown> {
@@ -94,6 +100,7 @@ export class DBInbound {
     subSortIndex: number;
     originNodeGuid: string;
     fallbackParent: FallbackParentRef | null;
+    runtimeStatus: RuntimeStatus | null;
 
     private _clientStatsMap: Map<string, ClientStats> | null = null;
 
@@ -124,6 +131,7 @@ export class DBInbound {
         this.subSortIndex = 1;
         this.originNodeGuid = "";
         this.fallbackParent = null;
+        this.runtimeStatus = null;
         if (data == null) {
             return;
         }

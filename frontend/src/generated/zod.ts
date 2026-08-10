@@ -442,8 +442,9 @@ export const InboundSchema = z.object({
   nodeId: z.number().int().nullable().optional(),
   originNodeGuid: z.string().optional(),
   port: z.number().int().min(0).max(65535),
-  protocol: z.enum(['vmess', 'vless', 'trojan', 'shadowsocks', 'wireguard', 'hysteria', 'http', 'mixed', 'tunnel', 'tun', 'mtproto']),
+  protocol: z.enum(['vmess', 'vless', 'trojan', 'shadowsocks', 'wireguard', 'hysteria', 'http', 'mixed', 'tunnel', 'tun', 'mtproto', 'snell']),
   remark: z.string(),
+  runtimeStatus: z.lazy(() => InboundViewStatusSchema).nullable().optional(),
   settings: z.unknown(),
   shareAddr: z.string(),
   shareAddrStrategy: z.enum(['node', 'listen', 'custom']),
@@ -498,6 +499,12 @@ export const InboundOptionSchema = z.object({
   wgPublicKey: z.string().optional(),
 });
 export type InboundOption = z.infer<typeof InboundOptionSchema>;
+
+export const InboundViewStatusSchema = z.object({
+  errorCategory: z.string().optional(),
+  running: z.boolean(),
+});
+export type InboundViewStatus = z.infer<typeof InboundViewStatusSchema>;
 
 export const MsgSchema = z.object({
   msg: z.string(),

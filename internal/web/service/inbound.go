@@ -171,6 +171,10 @@ func (s *InboundService) GetInbounds(userId int) ([]*model.Inbound, error) {
 	s.enrichClientStats(db, inbounds)
 	s.annotateFallbackParents(db, inbounds)
 	s.annotateLocalOriginGuid(inbounds)
+	s.annotateSnellStatus(inbounds)
+	for _, ib := range inbounds {
+		redactSnellList(ib)
+	}
 	return inbounds, nil
 }
 
@@ -213,6 +217,7 @@ func (s *InboundService) GetInboundsSlim(userId int) ([]*model.Inbound, error) {
 	}
 	s.annotateFallbackParents(db, inbounds)
 	s.annotateLocalOriginGuid(inbounds)
+	s.annotateSnellStatus(inbounds)
 	// Top up stats rows owned by sibling inbounds (multi-attached clients)
 	// so the list's depleted/expiring badges see every client; the UUID/SubId
 	// enrichment stays skipped. Must run before slimming strips the settings.
@@ -222,6 +227,7 @@ func (s *InboundService) GetInboundsSlim(userId int) ([]*model.Inbound, error) {
 	s.overlayInboundsClientStats(db, inbounds)
 	for _, ib := range inbounds {
 		ib.Settings = slimSettingsClients(ib.Settings)
+		redactSnellList(ib)
 	}
 	return inbounds, nil
 }
@@ -915,6 +921,9 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	if err := normalizeSnellInboundSettings(inbound, nil); err != nil {
 		return inbound, false, err
 	}
+	if err := s.ValidateSnell(inbound, false); err != nil {
+		return inbound, false, err
+	}
 	inbound.TrafficResetDay = normalizeTrafficResetDay(inbound.TrafficResetDay)
 	// Normalize streamSettings based on protocol
 	s.normalizeStreamSettings(inbound)
@@ -1358,13 +1367,16 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	if err != nil {
 		return inbound, false, err
 	}
+	// The stored placement is authoritative. Validate against it before the
+	// port-conflict check so an omitted nodeId cannot turn a remote Snell row
+	// into a locally accepted sidecar request.
+	inbound.NodeID = oldInbound.NodeID
 	if err := normalizeSnellInboundSettings(inbound, oldInbound); err != nil {
 		return inbound, false, err
 	}
-	// Restore the stored NodeID before the port-conflict check so a node inbound
-	// stays scoped to its own node (the payload's nodeId is unreliable, often absent).
-	inbound.NodeID = oldInbound.NodeID
-
+	if err := s.ValidateSnell(inbound, true); err != nil {
+		return inbound, false, err
+	}
 	conflict, err := s.checkPortConflict(inbound, inbound.Id)
 	if err != nil {
 		return inbound, false, err
