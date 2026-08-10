@@ -10,12 +10,14 @@ import (
 
 	"github.com/mhsanaei/3x-ui/v3/internal/database/model"
 	"github.com/mhsanaei/3x-ui/v3/internal/mtproto"
+	"github.com/mhsanaei/3x-ui/v3/internal/snell"
 	"github.com/mhsanaei/3x-ui/v3/internal/xray"
 )
 
 type LocalDeps struct {
 	APIPort        func() int
 	SetNeedRestart func()
+	Snell          *snell.Manager
 }
 
 type Local struct {
@@ -45,7 +47,10 @@ func (l *Local) withAPI(fn func(api *xray.XrayAPI) error) error {
 	return fn(&api)
 }
 
-func (l *Local) AddInbound(_ context.Context, ib *model.Inbound) error {
+func (l *Local) AddInbound(ctx context.Context, ib *model.Inbound) error {
+	if ib.Protocol == model.Snell {
+		return l.ensureSnell(ctx, ib)
+	}
 	if ib.Protocol == model.MTProto {
 		inst, ok := mtproto.InstanceFromInbound(ib)
 		if !ok {
@@ -62,7 +67,13 @@ func (l *Local) AddInbound(_ context.Context, ib *model.Inbound) error {
 	})
 }
 
-func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
+func (l *Local) DelInbound(ctx context.Context, ib *model.Inbound) error {
+	if ib.Protocol == model.Snell {
+		if l.deps.Snell == nil {
+			return errors.New("Snell runtime is unavailable")
+		}
+		return l.deps.Snell.Remove(ctx, ib.Id)
+	}
 	if ib.Protocol == model.MTProto {
 		mtproto.GetManager().Remove(ib.Id)
 		return nil
@@ -73,6 +84,9 @@ func (l *Local) DelInbound(_ context.Context, ib *model.Inbound) error {
 }
 
 func (l *Local) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) error {
+	if oldIb.Protocol == model.Snell || newIb.Protocol == model.Snell {
+		return l.updateSnellInbound(ctx, oldIb, newIb)
+	}
 	if oldIb.Protocol == model.MTProto || newIb.Protocol == model.MTProto {
 		return l.updateMtprotoInbound(ctx, oldIb, newIb)
 	}
@@ -81,6 +95,36 @@ func (l *Local) UpdateInbound(ctx context.Context, oldIb, newIb *model.Inbound) 
 		return nil
 	}
 	return l.AddInbound(ctx, newIb)
+}
+
+func (l *Local) ensureSnell(ctx context.Context, ib *model.Inbound) error {
+	if l.deps.Snell == nil {
+		return errors.New("Snell runtime is unavailable")
+	}
+	instance, err := snell.InstanceFromInbound(ib)
+	if err != nil {
+		return err
+	}
+	return l.deps.Snell.Ensure(ctx, instance)
+}
+
+func (l *Local) updateSnellInbound(ctx context.Context, oldIb, newIb *model.Inbound) error {
+	if oldIb.Protocol == model.Snell && newIb.Protocol != model.Snell {
+		if l.deps.Snell == nil {
+			return errors.New("Snell runtime is unavailable")
+		}
+		if err := l.deps.Snell.Remove(ctx, oldIb.Id); err != nil {
+			return err
+		}
+		if !newIb.Enable {
+			return nil
+		}
+		return l.AddInbound(ctx, newIb)
+	}
+	if oldIb.Protocol != model.Snell {
+		_ = l.DelInbound(ctx, oldIb)
+	}
+	return l.ensureSnell(ctx, newIb)
 }
 
 // updateMtprotoInbound applies an inbound update without the Del+Add sequence
@@ -113,7 +157,7 @@ func (l *Local) updateMtprotoInbound(ctx context.Context, oldIb, newIb *model.In
 }
 
 func (l *Local) AddUser(_ context.Context, ib *model.Inbound, userMap map[string]any) error {
-	if ib.Protocol == model.MTProto {
+	if ib.Protocol == model.MTProto || ib.Protocol == model.Snell {
 		return nil
 	}
 	return l.withAPI(func(api *xray.XrayAPI) error {
@@ -122,7 +166,7 @@ func (l *Local) AddUser(_ context.Context, ib *model.Inbound, userMap map[string
 }
 
 func (l *Local) RemoveUser(_ context.Context, ib *model.Inbound, email string) error {
-	if ib.Protocol == model.MTProto {
+	if ib.Protocol == model.MTProto || ib.Protocol == model.Snell {
 		return nil
 	}
 	return l.withAPI(func(api *xray.XrayAPI) error {
