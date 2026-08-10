@@ -33,9 +33,10 @@ device-level accounting in this release.
 - The authoritative release page supplies the four v5.0.1 Linux assets and
   describes Snell as a single binary (apart from glibc):
   <https://kb.nssurge.com/surge-knowledge-base/release-notes/snell>.
-- The traffic design relies on nftables named counters. `nft reset counter`
-  returns the current count and resets it, which provides the required atomic
-  sample-and-clear operation:
+- The traffic design relies on nftables named counters. The nftables
+  documentation covers declaring a named counter with initial `packets` and
+  `bytes` values and listing its current values, which lets the database and
+  counter represent the same monthly absolute totals:
   <https://wiki.nftables.org/wiki-nftables/index.php/Counters>.
 
 The supported server platforms are Linux hosts only:
@@ -64,11 +65,11 @@ trafficReset/day                      snell-server v5.0.1 sidecar
                                             ▼
                                       nftables table inet xui_snell
                                       counters snell_<id>_up/down
-                                            │ atomic sample and reset
+                                            │ read absolute byte values
                                             ▼
                                       periodic Snell reconcile/traffic job
                                             │
-                                            ├─ add deltas to Inbound.Up/Down
+                                            ├─ sync values to Inbound.Up/Down
                                             └─ stop sidecar when quota is reached
 ```
 
@@ -100,8 +101,8 @@ inbound or route Snell configuration through Xray.
 5. **nftables manager.** Own only the dedicated `inet xui_snell` table and its
    chains, rules, and named counters. It never flushes, lists for mutation, or
    rewrites user firewall tables.
-6. **Traffic/reconciliation job.** Reconciles desired sidecars, imports
-   counter deltas, enforces the hard quota, and applies the Snell-specific
+6. **Traffic/reconciliation job.** Reconciles desired sidecars, synchronizes
+   absolute counter totals, enforces the hard quota, and applies the Snell-specific
    monthly reset behavior described below.
 7. **Inbound UI.** Adds a Snell form, its read-only traffic display, and an
    explicit Surge configuration copy action. It adds no client-management UI.
@@ -178,20 +179,51 @@ are intended for a Snell process directly listening on the Host port; this
 release does not support an extra container, NAT-only, or user-space relay
 deployment as a substitute.
 
-Each collection interval uses the named-counter reset operation to obtain and
-clear an `up` and `down` byte delta atomically. The job retains successfully
-read deltas in memory until it has added them to the existing inbound traffic
-fields. On a temporary database failure it retries those retained deltas rather
-than discarding them. It must not add a second accounting baseline column or a
-traffic journal table in this release.
+Each named counter is the absolute byte total for the inbound's current traffic
+reset period. A regular collection interval only lists `snell_N_up` and
+`snell_N_down`, then writes their returned byte values directly to
+`Inbound.Up` and `Inbound.Down`; it never resets a counter, calculates a
+separate per-poll value, or keeps accounting state in memory. If the database
+write fails, the counter remains unchanged and the next collection naturally
+retries the same absolute values. No accounting baseline column or traffic
+journal table is added in this release.
 
-When the manager starts, it reconciles its own table: it creates missing
-objects for desired Snell inbounds and removes only objects belonging to
-nonexistent Snell inbounds. It never performs a system-wide nftables flush.
-Before changing a Snell port or deleting an inbound, it stops that sidecar and
-folds its final readable counter delta into the inbound's traffic before
-removing the old rules. Counters are recreated for a changed port; accumulated
-monthly `up` and `down` values are preserved.
+New counters start from the inbound's current database values, for example
+`snell_N_up` starts with `packets 0 bytes Inbound.Up` and `snell_N_down` starts
+with `packets 0 bytes Inbound.Down`. This seed rule applies whenever an object
+must be created or rebuilt. Thus an enabled inbound that changes port, has its
+managed rules restored, or is reconciled after a panel/Host restart retains the
+monthly total rather than double-counting or rewinding it.
+
+When the manager starts, it reconciles its own table: it lists existing managed
+counters first, retains valid counters whose values are at least the database
+value, creates only missing objects with the database seed, and removes only
+objects belonging to nonexistent Snell inbounds. It never performs a
+system-wide nftables flush. If a counter is missing while its sidecar could be
+serving traffic, the manager first stops that sidecar, creates the seeded
+counter/rule, and then restores the sidecar so no live interval is silently
+unmetered.
+
+A counter value below the database `up` or `down` value is an accounting
+anomaly, except during the serialized reset operation described below. The
+manager must stop that inbound's sidecar, rebuild only the lower counter/rule
+with the database value as its initial bytes, and then resume the sidecar only
+when the inbound remains enabled and within quota. It must never overwrite the
+larger database value with the lower counter value. Before a port change or
+delete, the manager stops the sidecar and synchronizes the final absolute
+counter values. A port change then recreates counters seeded with those values;
+delete removes only that inbound's rules and counters.
+
+Counters and database traffic are reset together only by the monthly reset or
+an explicit manual inbound traffic-reset operation. Both operations serialize
+with collection and lifecycle changes and stop the affected sidecar. The reset
+first sets the two named counters to zero and then writes both database values
+as zero. If the database write fails, the reset reports failure; the normal
+lower-counter recovery restores the counters from the still-nonzero database
+values, so the reset does not silently create a lower total. A successful reset
+therefore leaves both stores at zero before applying its restart behavior. A
+manual reset preserves the inbound's enable state; the monthly reset follows
+the automatic recovery rules below.
 
 ## Lifecycle and quota behavior
 
@@ -205,14 +237,15 @@ Snell inbound is recorded and surfaced for that inbound only.
    start one sidecar. An already-consumed nonzero `total` is enforced before
    starting, so an enabled inbound cannot remain running above its quota.
 2. **Update listener, port, or PSK:** serialize the operation; stop the old
-   process; collect its final traffic delta; replace configuration and affected
-   counter rules; then start the replacement process if it remains enabled and
-   within quota.
+   process; synchronize its final absolute counter values; replace configuration
+   and affected counter rules seeded from those values; then start the
+   replacement process if it remains enabled and within quota.
 3. **Manual disable:** stop the process while retaining its configuration,
    counters, and accumulated monthly traffic. It does not create a special
    disable reason.
-4. **Delete:** stop the process, collect final traffic where possible, delete
-   its configuration and only its named counters/rules, and remove the inbound.
+4. **Delete:** stop the process, synchronize final absolute traffic where
+   possible, delete its configuration and only its named counters/rules, and
+   remove the inbound.
 5. **Unexpected exit:** while the inbound is enabled and below quota, retry
    sidecar start with bounded exponential backoff. A successful intentional
    stop, a disabled inbound, and a quota stop must not schedule a restart.
@@ -223,7 +256,8 @@ Snell inbound is recorded and surfaced for that inbound only.
 
 ### Hard traffic quota
 
-After adding each counter delta, the traffic job checks `total`. A zero or
+After synchronizing each counter's absolute values, the traffic job checks
+`total`. A zero or
 otherwise existing “unlimited” total preserves the project's current unlimited
 semantics. For a positive total, when `up + down >= total`, the job must:
 
@@ -240,11 +274,11 @@ For a Snell inbound whose `trafficReset` is `monthly`, the existing monthly
 schedule and its `trafficResetDay` determine when the reset runs. On that date,
 the Snell-specific extension to the periodic reset job must:
 
-1. stop the sidecar if it is running and collect any final readable traffic;
-2. reset its nftables counters;
-3. set inbound `up` and `down` to zero;
-4. set inbound `enable` to `true` unconditionally; and
-5. recreate/start the sidecar after prerequisites and settings validate.
+1. stop the sidecar if it is running and enter the serialized reset operation;
+2. reset its nftables counters and inbound `up`/`down` values to zero as
+   described in the accounting section;
+3. set inbound `enable` to `true` unconditionally; and
+4. recreate/start the sidecar after prerequisites and settings validate.
 
 There is deliberately no `disableReason`, `quotaDisabled`, or other database
 field. Consequently, a manually disabled Snell inbound with a monthly reset is
@@ -308,13 +342,20 @@ Required coverage:
    concurrent operation serialization, intentional stop, bounded crash restart,
    and identified-orphan cleanup using a fake `snell-server`.
 5. nftables rule generation for TCP and UDP in both directions, counter-name
-   validation, parse of returned counts, atomic reset request, cleanup of stale
-   Snell-only objects, and no command that flushes or modifies another table.
-6. Traffic delta persistence, retry after a transient database failure, quota
-   exhaustion stopping only the matching process, and no impact on a second
-   Snell inbound or an Xray/MTProto inbound.
-7. Monthly reset clears traffic/counters and unconditionally enables and starts
-   a valid Snell inbound, including one that had been manually disabled. Verify
+   validation, initial-byte seeding, and parsing/listing of absolute counts;
+   cleanup of stale Snell-only objects; and no command that flushes or modifies
+   another table.
+6. Absolute-value synchronization writes named-counter bytes to the inbound;
+   a transient database failure is retried by the next unchanged counter read;
+   counter creation/recreation seeds from the database; and a counter lower
+   than the database stops, rebuilds, and only then resumes that sidecar without
+   an accounting rollback. Cover port update, missing-rule recovery, and panel
+   restart so none duplicate or omit already recorded monthly traffic.
+7. Quota exhaustion stops only the matching process and has no impact on a
+   second Snell inbound or an Xray/MTProto inbound. Monthly reset and explicit
+   manual reset clear both database values and named counters; monthly reset
+   unconditionally enables and starts a valid Snell inbound, including one that
+   had been manually disabled, while manual reset preserves enable state. Verify
    that no existing protocol's periodic-reset behavior changes.
 8. Panel restart reconciliation, unavailable nftables, missing binary, process
    start failure, and malformed settings produce isolated errors and never
@@ -336,12 +377,15 @@ The implementation is complete when all of the following are true:
    single `up + down` monthly quota; a second quota is represented by a second
    inbound rather than a client record.
 3. TCP and UDP bytes for each direct Host listener are accounted separately as
-   inbound `up` and `down` using only `inet xui_snell` named counters.
+   absolute inbound `up` and `down` values using only `inet xui_snell` named
+   counters. Regular collection never resets a counter; counter creation,
+   recovery, and port replacement seed it with the existing database total.
 4. Reaching a positive inbound `total` disables the inbound and stops its
    sidecar without stopping another sidecar or any Xray/MTProto service.
 5. A monthly reset clears Snell traffic and counters, sets `enable=true`, and
    restarts a valid Snell sidecar even when it was manually disabled before the
-   reset; `trafficReset=never` is the documented way to keep it disabled.
+   reset; an explicit manual reset clears both stores while preserving enable
+   state; and `trafficReset=never` is the documented way to keep it disabled.
 6. PSKs are generated securely, editable, stored in `0600` runtime
    configuration, omitted from list APIs/logs, and available only through
    authorized detail/edit or explicit copy flows.
@@ -379,8 +423,9 @@ The implementation is complete when all of the following are true:
 | --- | --- |
 | Host lacks nftables privileges | Refuse that inbound start with a prerequisite error; do not provide a lower-fidelity fallback. |
 | Sidecar crash/restart loop | Bound retries with exponential backoff and stop scheduling when disabled or quota-stopped. |
-| Misconfigured update loses a live listener | Serialize per-inbound lifecycle operations, collect final traffic before rule replacement, and start the replacement only after validation. |
+| Misconfigured update loses a live listener | Serialize per-inbound lifecycle operations, synchronize final absolute totals before rule replacement, seed the replacement counters from those totals, and start only after validation. |
 | User firewall interference | Use only `inet xui_snell`, pass no verdict, and never flush or mutate another table. |
 | PSK disclosure | Use `0600` files, redact logs/list responses, and restrict plaintext to authorized edit/copy flows. |
-| Accounting write is temporarily unavailable | Retain sampled deltas in memory and retry instead of dropping them; no database schema is added in this scoped release. |
+| Accounting write is temporarily unavailable | Leave the named counter unchanged; the next collection writes the same absolute value, with no per-poll in-memory accounting state or database schema required. |
+| Counter value falls below the database total | Stop only that sidecar, rebuild its own counter/rule seeded from the larger database value, then resume only if enabled and under quota. |
 | Shared credentials cannot identify Macs | Treat the inbound as a deliberately shared allowance; require separate inbounds for separate allowances. |
