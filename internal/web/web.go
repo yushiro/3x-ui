@@ -329,7 +329,7 @@ func (s *Server) startTask(restartXray bool, loc *time.Location) {
 	_, _ = s.cron.AddJob(cadenceMtproto, mtJob)
 	go mtJob.Run()
 
-	snellJob := job.NewSnellJob(&s.inboundService, nil)
+	snellJob := job.NewSnellJob(&service.InboundService{}, nil)
 	_, _ = s.cron.AddJob(cadenceMtproto, snellJob)
 	go snellJob.Run()
 
