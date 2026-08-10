@@ -48,6 +48,15 @@ func (l *Local) ResetSnellTraffic(ctx context.Context, id int) error {
 	return l.deps.Snell.ResetTraffic(ctx, id)
 }
 
+// CheckSnellHost validates Host-only prerequisites before an enabled CRUD
+// transition is committed.
+func (l *Local) CheckSnellHost(ctx context.Context) error {
+	if l.deps.Snell == nil {
+		return errors.New("Snell runtime is unavailable")
+	}
+	return l.deps.Snell.CheckHost(ctx)
+}
+
 // StopSnell stops one sidecar without deleting its owned counter objects.
 func (l *Local) StopSnell(ctx context.Context, id int) error {
 	if l.deps.Snell == nil {

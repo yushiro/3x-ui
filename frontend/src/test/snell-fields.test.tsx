@@ -108,6 +108,6 @@ describe('Snell inbound form contract', () => {
     expect(screen.queryByRole('tab', { name: /advanced/i })).toBeNull();
     fireEvent.click(screen.getByRole('tab', { name: 'Protocol' }));
     expect(await screen.findByLabelText('PSK')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Copy Surge v5' })).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Copy Surge v5' }) as HTMLButtonElement).disabled).toBe(true);
   });
 });

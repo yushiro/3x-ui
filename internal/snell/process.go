@@ -123,7 +123,11 @@ type commandNftExecutor struct{}
 func NewNftManager() *NftManager { return &NftManager{Exec: commandNftExecutor{}} }
 
 func (commandNftExecutor) Run(ctx context.Context, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, "nft", args...).CombinedOutput()
+	output, err := exec.CommandContext(ctx, "nft", args...).CombinedOutput()
+	if err != nil && len(output) > 0 {
+		return output, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return output, err
 }
 
 var managedConfigName = regexp.MustCompile(`^snell-[1-9][0-9]*\.conf$`)

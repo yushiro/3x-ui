@@ -702,6 +702,21 @@ func (s *InboundService) ResetAllTraffics() error {
 		return s.resetAllTrafficsLocked()
 	})
 	if err == nil {
+		var snellIDs []int
+		if queryErr := database.GetDB().Model(&model.Inbound{}).
+			Where("protocol = ? AND node_id IS NULL AND user_id > ?", model.Snell, 0).
+			Pluck("id", &snellIDs).Error; queryErr != nil {
+			err = queryErr
+		} else {
+			for _, id := range snellIDs {
+				if resetErr := s.ResetSnellTraffic(context.Background(), id, false); resetErr != nil {
+					err = resetErr
+					break
+				}
+			}
+		}
+	}
+	if err == nil {
 		s.propagateResetAllTrafficsToNodes()
 		s.resetAllMtprotoQuotas()
 	}
@@ -713,7 +728,7 @@ func (s *InboundService) resetAllTrafficsLocked() error {
 	now := time.Now().UnixMilli()
 
 	return db.Model(model.Inbound{}).
-		Where("user_id > ?", 0).
+		Where("user_id > ? AND protocol <> ?", 0, model.Snell).
 		Updates(map[string]any{
 			"up":                      0,
 			"down":                    0,

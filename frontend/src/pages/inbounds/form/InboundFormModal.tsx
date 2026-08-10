@@ -280,7 +280,7 @@ export default function InboundFormModal({
   const snellHost = resolveShareHost(
     { listen: wListen, shareAddr: wShareAddr, shareAddrStrategy: String(shareAddrStrategy) },
     snellNodeHost,
-    window.location.hostname,
+    '',
   );
 
   const {

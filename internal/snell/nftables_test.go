@@ -2,6 +2,7 @@ package snell
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -39,6 +40,57 @@ func TestNftRulesAreAbsoluteAndPrivate(t *testing.T) {
 	}
 	if strings.Contains(joined, "flush") || strings.Contains(joined, "table ip ") || strings.Contains(joined, "accept") || strings.Contains(joined, "drop") {
 		t.Fatalf("unsafe firewall command: %s", joined)
+	}
+}
+
+func TestNftRulesSplitInboundAndOutboundHooks(t *testing.T) {
+	f := &fakeNft{output: []byte(`{"nftables":[]}`)}
+	m := &NftManager{Exec: f}
+	if err := m.EnsureInbound(context.Background(), 8, 8443, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	joined := f.joined()
+	for _, want := range []string{
+		"chain inet xui_snell snell_input { type filter hook input priority 0; }",
+		"chain inet xui_snell snell_output { type filter hook output priority 0; }",
+		"snell_input tcp dport 8443 counter name snell_8_up",
+		"snell_input udp dport 8443 counter name snell_8_up",
+		"snell_output tcp sport 8443 counter name snell_8_down",
+		"snell_output udp sport 8443 counter name snell_8_down",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing managed directional rule %q in %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "snell_input tcp sport 8443") || strings.Contains(joined, "snell_input udp sport 8443") {
+		t.Fatalf("downstream rules must not remain in input hook: %s", joined)
+	}
+}
+
+type diagnosticNft struct{ calls [][]string }
+
+func (f *diagnosticNft) Run(_ context.Context, args ...string) ([]byte, error) {
+	f.calls = append(f.calls, args)
+	joined := strings.Join(args, " ")
+	switch {
+	case strings.HasPrefix(joined, "add table "), strings.HasPrefix(joined, "add chain "):
+		return []byte("Error: Could not process rule: File exists"), errors.New("exit status 1")
+	case strings.HasPrefix(joined, "delete counter "):
+		return []byte("Error: No such file or directory"), errors.New("exit status 1")
+	case strings.HasPrefix(joined, "-j list counters "), strings.HasPrefix(joined, "-j -a list chain "):
+		return []byte(`{"nftables":[]}`), nil
+	}
+	return nil, nil
+}
+
+func TestNftIdempotencyUsesNftDiagnosticOutput(t *testing.T) {
+	f := &diagnosticNft{}
+	m := &NftManager{Exec: f}
+	if err := m.EnsureInbound(context.Background(), 9, 443, 0, 0); err != nil {
+		t.Fatalf("duplicate table/chain diagnostics must be idempotent: %v", err)
+	}
+	if err := m.RemoveInbound(context.Background(), 9); err != nil {
+		t.Fatalf("missing counter diagnostic must be idempotent: %v", err)
 	}
 }
 

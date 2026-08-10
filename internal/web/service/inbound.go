@@ -924,6 +924,11 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	if err := s.ValidateSnell(inbound, false); err != nil {
 		return inbound, false, err
 	}
+	if inbound.Protocol == model.Snell && inbound.Enable {
+		if err := s.checkSnellHost(context.Background(), inbound); err != nil {
+			return inbound, false, err
+		}
+	}
 	inbound.TrafficResetDay = normalizeTrafficResetDay(inbound.TrafficResetDay)
 	// Normalize streamSettings based on protocol
 	s.normalizeStreamSettings(inbound)
@@ -1033,6 +1038,7 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	db := database.GetDB()
 	needRestart := false
 	var postCommitApply func()
+	var snellApplyErr error
 	err = db.Transaction(func(tx *gorm.DB) error {
 		markDirty := false
 		if err := tx.Omit("ClientStats").Save(inbound).Error; err != nil {
@@ -1097,7 +1103,14 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 							pushable = false
 						}
 					}
-					if pushable {
+					if inbound.Protocol == model.Snell {
+						postCommitApply = func() {
+							if err1 := rt.AddInbound(context.Background(), inbound); err1 != nil {
+								snellApplyErr = err1
+								_ = rt.DelInbound(context.Background(), inbound)
+							}
+						}
+					} else if pushable {
 						postCommitApply = func() {
 							if err1 := rt.AddInbound(context.Background(), payload); err1 == nil {
 								logger.Debug("New inbound added on", rt.Name(), ":", inbound.Tag)
@@ -1121,6 +1134,10 @@ func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, boo
 	if postCommitApply != nil {
 		postCommitApply()
 	}
+	if snellApplyErr != nil {
+		_ = db.Delete(&model.Inbound{}, inbound.Id).Error
+		return inbound, false, snellApplyErr
+	}
 
 	// A routed mtproto inbound is not an Xray inbound itself, so the runtime
 	// push above only (re)starts the mtg sidecar. The egress SOCKS bridge lives
@@ -1139,7 +1156,26 @@ func (s *InboundService) DelInbound(id int) (bool, error) {
 	var postCommitApply func()
 	var ib model.Inbound
 	loadErr := db.Model(model.Inbound{}).Where("id = ?", id).First(&ib).Error
-	if loadErr == nil {
+	if loadErr == nil && ib.Protocol == model.Snell && ib.NodeID == nil {
+		if ib.Enable {
+			counters, err := s.stopAndReadSnellTraffic(context.Background(), &ib)
+			if err != nil {
+				return false, err
+			}
+			if err := s.syncSnellCounters(context.Background(), &ib, counters); err != nil {
+				return false, err
+			}
+			ib.Up = max(ib.Up, counters.UpBytes)
+			ib.Down = max(ib.Down, counters.DownBytes)
+		}
+		rt, err := s.snellRuntimeFor(&ib)
+		if err != nil {
+			return false, err
+		}
+		if err := rt.DelInbound(context.Background(), &ib); err != nil {
+			return false, err
+		}
+	} else if loadErr == nil {
 		shouldPushToRuntime := ib.NodeID != nil || ib.Enable
 		if shouldPushToRuntime {
 			if ib.NodeID != nil {
@@ -1285,6 +1321,9 @@ func (s *InboundService) SetInboundEnable(id int, enable bool) (bool, error) {
 	if inbound.Enable == enable {
 		return false, nil
 	}
+	if inbound.Protocol == model.Snell && inbound.NodeID == nil {
+		return s.setSnellEnable(inbound, enable)
+	}
 
 	db := database.GetDB()
 	if err := db.Transaction(func(tx *gorm.DB) error {
@@ -1376,6 +1415,23 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	}
 	if err := s.ValidateSnell(inbound, true); err != nil {
 		return inbound, false, err
+	}
+	localSnellUpdate := oldInbound.Protocol == model.Snell && oldInbound.NodeID == nil && inbound.Protocol == model.Snell
+	if localSnellUpdate && inbound.Enable {
+		if err := s.checkSnellHost(context.Background(), inbound); err != nil {
+			return inbound, false, err
+		}
+	}
+	if localSnellUpdate && oldInbound.Enable {
+		counters, err := s.stopAndReadSnellTraffic(context.Background(), oldInbound)
+		if err != nil {
+			return inbound, false, err
+		}
+		if err := s.syncSnellCounters(context.Background(), oldInbound, counters); err != nil {
+			return inbound, false, err
+		}
+		oldInbound.Up = max(oldInbound.Up, counters.UpBytes)
+		oldInbound.Down = max(oldInbound.Down, counters.DownBytes)
 	}
 	conflict, err := s.checkPortConflict(inbound, inbound.Id)
 	if err != nil {
@@ -1522,6 +1578,17 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 			}
 			if !push {
 				needRestart = true
+			} else if localSnellUpdate {
+				payload := oldInbound
+				postCommitApply = func() {
+					if !payload.Enable {
+						return
+					}
+					if err2 := rt.AddInbound(context.Background(), payload); err2 != nil {
+						logger.Debug("Unable to update Snell inbound on", rt.Name(), ":", err2)
+						needRestart = true
+					}
+				}
 			} else if oldProtocol == model.MTProto || oldInbound.Protocol == model.MTProto {
 				oldSnapshot := *oldInbound
 				oldSnapshot.Tag = tag

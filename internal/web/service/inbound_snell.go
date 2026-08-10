@@ -61,6 +61,81 @@ func (s *InboundService) ApplySnellInbound(ctx context.Context, oldInbound, inbo
 	return rt.UpdateInbound(ctx, oldInbound, inbound)
 }
 
+func (s *InboundService) checkSnellHost(ctx context.Context, inbound *model.Inbound) error {
+	rt, err := s.snellRuntimeFor(inbound)
+	if err != nil {
+		return err
+	}
+	checker, ok := rt.(interface{ CheckSnellHost(context.Context) error })
+	if !ok {
+		return errors.New("Snell runtime is unavailable")
+	}
+	return checker.CheckSnellHost(ctx)
+}
+
+// stopAndReadSnellTraffic closes the accounting window before a lifecycle
+// change, then returns the final absolute counters for the same inbound.
+func (s *InboundService) stopAndReadSnellTraffic(ctx context.Context, inbound *model.Inbound) (snell.Counters, error) {
+	rt, err := s.snellRuntimeFor(inbound)
+	if err != nil {
+		return snell.Counters{}, err
+	}
+	stopper, ok := rt.(interface{ StopSnell(context.Context, int) error })
+	if !ok {
+		return snell.Counters{}, errors.New("Snell runtime is unavailable")
+	}
+	if err := stopper.StopSnell(ctx, inbound.Id); err != nil {
+		return snell.Counters{}, err
+	}
+	reader, ok := rt.(interface {
+		ReadSnellCounters(context.Context, int) (snell.Counters, error)
+	})
+	if !ok {
+		return snell.Counters{}, errors.New("Snell runtime is unavailable")
+	}
+	return reader.ReadSnellCounters(ctx, inbound.Id)
+}
+
+func (s *InboundService) setSnellEnable(inbound *model.Inbound, enable bool) (bool, error) {
+	ctx := context.Background()
+	if enable {
+		if err := s.checkSnellHost(ctx, inbound); err != nil {
+			return false, err
+		}
+		if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", inbound.Id).Update("enable", true).Error; err != nil {
+			return false, err
+		}
+		inbound.Enable = true
+		rt, err := s.snellRuntimeFor(inbound)
+		if err != nil {
+			_ = database.GetDB().Model(&model.Inbound{}).Where("id = ?", inbound.Id).Update("enable", false).Error
+			inbound.Enable = false
+			return false, err
+		}
+		if err := rt.AddInbound(ctx, inbound); err != nil {
+			_ = database.GetDB().Model(&model.Inbound{}).Where("id = ?", inbound.Id).Update("enable", false).Error
+			inbound.Enable = false
+			return false, err
+		}
+		return false, nil
+	}
+
+	counters, err := s.stopAndReadSnellTraffic(ctx, inbound)
+	if err != nil {
+		return false, err
+	}
+	if err := s.syncSnellCounters(ctx, inbound, counters); err != nil {
+		return false, err
+	}
+	if err := database.GetDB().Model(&model.Inbound{}).Where("id = ?", inbound.Id).Update("enable", false).Error; err != nil {
+		return false, err
+	}
+	inbound.Enable = false
+	inbound.Up = max(inbound.Up, counters.UpBytes)
+	inbound.Down = max(inbound.Down, counters.DownBytes)
+	return false, nil
+}
+
 func redactSnellList(inbound *model.Inbound) {
 	if inbound == nil || inbound.Protocol != model.Snell {
 		return
@@ -199,19 +274,11 @@ func (s *InboundService) EnforceSnellQuota(ctx context.Context, id int) error {
 
 func (s *InboundService) ResetSnellTraffic(ctx context.Context, id int, monthly bool) error {
 	var inbound model.Inbound
-	err := submitTrafficWrite(func() error {
-		if err := database.GetDB().Where("id = ? AND protocol = ? AND node_id IS NULL", id, model.Snell).First(&inbound).Error; err != nil {
-			return err
-		}
-		updates := map[string]any{"up": 0, "down": 0}
-		if monthly {
-			updates["enable"] = true
-			inbound.Enable = true
-		}
-		return database.GetDB().Model(&model.Inbound{}).Where("id = ?", id).Updates(updates).Error
-	})
-	if err != nil || runtime.GetManager() == nil {
+	if err := database.GetDB().Where("id = ? AND protocol = ? AND node_id IS NULL", id, model.Snell).First(&inbound).Error; err != nil {
 		return err
+	}
+	if runtime.GetManager() == nil {
+		return errors.New("Snell runtime is unavailable")
 	}
 	local, ok := runtime.GetManager().Local().(interface {
 		ResetSnellTraffic(context.Context, int) error
@@ -220,9 +287,33 @@ func (s *InboundService) ResetSnellTraffic(ctx context.Context, id int, monthly 
 		return errors.New("Snell runtime is unavailable")
 	}
 	if err := local.ResetSnellTraffic(ctx, id); err != nil {
+		if inbound.Enable {
+			if rt, runtimeErr := s.snellRuntimeFor(&inbound); runtimeErr == nil {
+				_ = rt.AddInbound(ctx, &inbound)
+			}
+		}
 		return err
 	}
-	if !monthly {
+	updates := map[string]any{"up": 0, "down": 0}
+	if monthly {
+		updates["enable"] = true
+	}
+	if err := submitTrafficWrite(func() error {
+		return database.GetDB().Model(&model.Inbound{}).Where("id = ?", id).Updates(updates).Error
+	}); err != nil {
+		if inbound.Enable {
+			if rt, runtimeErr := s.snellRuntimeFor(&inbound); runtimeErr == nil {
+				_ = rt.AddInbound(ctx, &inbound)
+			}
+		}
+		return err
+	}
+	inbound.Up = 0
+	inbound.Down = 0
+	if monthly {
+		inbound.Enable = true
+	}
+	if !inbound.Enable {
 		return nil
 	}
 	if _, err := snell.InstanceFromInbound(&inbound); err != nil {

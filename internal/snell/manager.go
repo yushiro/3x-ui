@@ -110,6 +110,7 @@ func (m *Manager) ensureLocked(ctx context.Context, instance Instance) error {
 
 	m.sweepOrphansLocked()
 	cur := m.byID[instance.ID]
+	replacePortRules := cur != nil && cur.instance.Port != instance.Port
 	if cur != nil && cur.process != nil && cur.process.Running() {
 		if sameProcessConfig(cur.instance, instance) {
 			cur.instance = instance
@@ -137,6 +138,11 @@ func (m *Manager) ensureLocked(ctx context.Context, instance Instance) error {
 	}
 	if err := os.MkdirAll(m.ConfigDir, 0o700); err != nil {
 		return err
+	}
+	if replacePortRules {
+		if err := m.Nft.RemoveInbound(ctx, instance.ID); err != nil {
+			return err
+		}
 	}
 	path := m.configPath(instance.ID)
 	if err := WriteConfig(path, data); err != nil {
@@ -349,6 +355,15 @@ func (m *Manager) Status(id int) Status {
 	return Status{}
 }
 
+// CheckHost validates the fixed Host-only prerequisites without starting a
+// sidecar. CRUD paths use it before committing an enabled transition.
+func (m *Manager) CheckHost(ctx context.Context) error {
+	if m == nil || m.Host == nil {
+		return errors.New("Snell host checker is unavailable")
+	}
+	return m.Host.Check(ctx)
+}
+
 // ResetTraffic resets the private nft counters for one managed inbound.
 func (m *Manager) ResetTraffic(ctx context.Context, id int) error {
 	m.mu.Lock()
@@ -356,7 +371,17 @@ func (m *Manager) ResetTraffic(ctx context.Context, id int) error {
 	if m.Nft == nil {
 		return errors.New("Snell nft manager is unavailable")
 	}
-	return m.Nft.ResetInbound(ctx, id)
+	if err := m.stopLocked(ctx, id, true); err != nil {
+		return err
+	}
+	if err := m.Nft.ResetInbound(ctx, id); err != nil {
+		return err
+	}
+	if cur := m.byID[id]; cur != nil {
+		cur.instance.Up = 0
+		cur.instance.Down = 0
+	}
+	return nil
 }
 
 func (m *Manager) configPath(id int) string {

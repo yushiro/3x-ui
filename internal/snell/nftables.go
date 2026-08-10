@@ -14,7 +14,8 @@ import (
 const (
 	nftFamily = "inet"
 	nftTable  = "xui_snell"
-	nftChain  = "snell_input"
+	nftInputChain  = "snell_input"
+	nftOutputChain = "snell_output"
 )
 
 // Counters holds absolute byte totals reported by nftables.
@@ -170,7 +171,10 @@ func (m *NftManager) ensureBase(ctx context.Context) error {
 	if err := m.runIgnoreExists(ctx, "add", "table", nftFamily, nftTable); err != nil {
 		return err
 	}
-	return m.runIgnoreExists(ctx, "add", "chain", nftFamily, nftTable, nftChain, "{", "type", "filter", "hook", "input", "priority", "0;", "}")
+	if err := m.runIgnoreExists(ctx, "add", "chain", nftFamily, nftTable, nftInputChain, "{", "type", "filter", "hook", "input", "priority", "0;", "}"); err != nil {
+		return err
+	}
+	return m.runIgnoreExists(ctx, "add", "chain", nftFamily, nftTable, nftOutputChain, "{", "type", "filter", "hook", "output", "priority", "0;", "}")
 }
 
 func (m *NftManager) replaceCounter(ctx context.Context, name string, seed int64) error {
@@ -186,10 +190,10 @@ func (m *NftManager) addInboundRules(ctx context.Context, port int, upName, down
 	upComment := strconv.Quote(upName)
 	downComment := strconv.Quote(downName)
 	rules := [][]string{
-		{"add", "rule", nftFamily, nftTable, nftChain, "tcp", "dport", portText, "counter", "name", upName, "comment", upComment},
-		{"add", "rule", nftFamily, nftTable, nftChain, "udp", "dport", portText, "counter", "name", upName, "comment", upComment},
-		{"add", "rule", nftFamily, nftTable, nftChain, "tcp", "sport", portText, "counter", "name", downName, "comment", downComment},
-		{"add", "rule", nftFamily, nftTable, nftChain, "udp", "sport", portText, "counter", "name", downName, "comment", downComment},
+		{"add", "rule", nftFamily, nftTable, nftInputChain, "tcp", "dport", portText, "counter", "name", upName, "comment", upComment},
+		{"add", "rule", nftFamily, nftTable, nftInputChain, "udp", "dport", portText, "counter", "name", upName, "comment", upComment},
+		{"add", "rule", nftFamily, nftTable, nftOutputChain, "tcp", "sport", portText, "counter", "name", downName, "comment", downComment},
+		{"add", "rule", nftFamily, nftTable, nftOutputChain, "udp", "sport", portText, "counter", "name", downName, "comment", downComment},
 	}
 	for _, rule := range rules {
 		if _, err := m.run(ctx, rule...); err != nil {
@@ -200,13 +204,15 @@ func (m *NftManager) addInboundRules(ctx context.Context, port int, upName, down
 }
 
 func (m *NftManager) removeInboundRules(ctx context.Context, names ...string) error {
-	handles, err := m.ruleHandles(ctx, names...)
-	if err != nil {
-		return err
-	}
-	for _, handle := range handles {
-		if _, err := m.run(ctx, "delete", "rule", nftFamily, nftTable, nftChain, "handle", strconv.FormatInt(handle, 10)); err != nil {
+	for _, chain := range []string{nftInputChain, nftOutputChain} {
+		handles, err := m.ruleHandles(ctx, chain, names...)
+		if err != nil {
 			return err
+		}
+		for _, handle := range handles {
+			if _, err := m.run(ctx, "delete", "rule", nftFamily, nftTable, chain, "handle", strconv.FormatInt(handle, 10)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -220,8 +226,8 @@ func (m *NftManager) listCounterValues(ctx context.Context) (map[string]int64, e
 	return parseCounterValues(output)
 }
 
-func (m *NftManager) ruleHandles(ctx context.Context, names ...string) ([]int64, error) {
-	output, err := m.run(ctx, "-j", "-a", "list", "chain", nftFamily, nftTable, nftChain)
+func (m *NftManager) ruleHandles(ctx context.Context, chain string, names ...string) ([]int64, error) {
+	output, err := m.run(ctx, "-j", "-a", "list", "chain", nftFamily, nftTable, chain)
 	if err != nil {
 		return nil, err
 	}
@@ -249,19 +255,24 @@ func (m *NftManager) run(ctx context.Context, args ...string) ([]byte, error) {
 }
 
 func (m *NftManager) runIgnoreExists(ctx context.Context, args ...string) error {
-	_, err := m.run(ctx, args...)
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "file exists") {
+	output, err := m.run(ctx, args...)
+	if err != nil && !containsNftDiagnostic(err, output, "file exists") {
 		return err
 	}
 	return nil
 }
 
 func (m *NftManager) runIgnoreMissing(ctx context.Context, args ...string) error {
-	_, err := m.run(ctx, args...)
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such file") {
+	output, err := m.run(ctx, args...)
+	if err != nil && !containsNftDiagnostic(err, output, "no such file") {
 		return err
 	}
 	return nil
+}
+
+func containsNftDiagnostic(err error, output []byte, diagnostic string) bool {
+	return strings.Contains(strings.ToLower(err.Error()), diagnostic) ||
+		strings.Contains(strings.ToLower(string(output)), diagnostic)
 }
 
 var counterNamePattern = regexp.MustCompile(`^snell_([1-9][0-9]*)_(up|down)$`)
