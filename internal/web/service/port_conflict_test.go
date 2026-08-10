@@ -98,6 +98,23 @@ func TestInboundTransports(t *testing.T) {
 	}
 }
 
+func TestCheckPortConflict_SnellParticipatesAsTCP(t *testing.T) {
+	setupConflictDB(t)
+	seedInboundConflict(t, "vless-45123", "0.0.0.0", 45123, model.VLESS, `{"network":"tcp"}`, `{}`)
+
+	svc := &InboundService{}
+	candidate := &model.Inbound{
+		Tag:      "snell-45123",
+		Listen:   "0.0.0.0",
+		Port:     45123,
+		Protocol: model.Snell,
+		Settings: `{"psk":"0123456789abcdef"}`,
+	}
+	if conflict, err := svc.checkPortConflict(candidate, 0); err != nil || conflict == nil {
+		t.Fatalf("Snell TCP inbound must conflict with an existing TCP inbound; conflict=%v err=%v", conflict, err)
+	}
+}
+
 func TestListenOverlaps(t *testing.T) {
 	cases := []struct {
 		a, b string

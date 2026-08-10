@@ -912,6 +912,9 @@ func (s *InboundService) normalizeMtprotoXrayPort(inbound *model.Inbound, oldSet
 // Returns the created inbound, whether Xray needs restart, and any error.
 func (s *InboundService) AddInbound(inbound *model.Inbound) (*model.Inbound, bool, error) {
 	inbound.Id = 0
+	if err := normalizeSnellInboundSettings(inbound, nil); err != nil {
+		return inbound, false, err
+	}
 	inbound.TrafficResetDay = normalizeTrafficResetDay(inbound.TrafficResetDay)
 	// Normalize streamSettings based on protocol
 	s.normalizeStreamSettings(inbound)
@@ -1355,6 +1358,9 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 	if err != nil {
 		return inbound, false, err
 	}
+	if err := normalizeSnellInboundSettings(inbound, oldInbound); err != nil {
+		return inbound, false, err
+	}
 	// Restore the stored NodeID before the port-conflict check so a node inbound
 	// stays scoped to its own node (the payload's nodeId is unreliable, often absent).
 	inbound.NodeID = oldInbound.NodeID
@@ -1606,6 +1612,30 @@ func (s *InboundService) UpdateInbound(inbound *model.Inbound) (*model.Inbound, 
 		}
 	}
 	return inbound, needRestart, nil
+}
+
+// normalizeSnellInboundSettings applies Snell's single-PSK settings contract
+// before the generic client lifecycle code sees the inbound.
+func normalizeSnellInboundSettings(inbound, existing *model.Inbound) error {
+	if inbound.Protocol != model.Snell {
+		return nil
+	}
+
+	var previous *model.SnellSettings
+	if existing != nil && existing.Protocol == model.Snell {
+		settings, err := model.ParseSnellSettings(existing.Settings)
+		if err != nil {
+			return common.NewError("invalid existing Snell settings")
+		}
+		previous = &settings
+	}
+
+	normalized, err := model.NormalizeSnellSettings(inbound.Settings, previous)
+	if err != nil {
+		return common.NewError("invalid Snell settings")
+	}
+	inbound.Settings = normalized
+	return nil
 }
 
 // A node mirrors this payload into its own DB, so every client must survive:
