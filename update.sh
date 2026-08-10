@@ -99,6 +99,80 @@ arch() {
     esac
 }
 
+# SNELL_V5_HELPERS_BEGIN
+SNELL_AMD64_URL="https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-amd64.zip"
+SNELL_AMD64_SHA256="9bea1c2b9e35b73b31634856c04d18c393072b9e5dcde6a32781d8b8f908c539"
+SNELL_386_URL="https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-i386.zip"
+SNELL_386_SHA256="6a3e30928315427d6f747f26408d0f74eb88f460344d0e1fcb3f7c32c708a09d"
+SNELL_ARM64_URL="https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-aarch64.zip"
+SNELL_ARM64_SHA256="2f178bf5ac468ce1a130454efa40a0603fbbe4e47ecc4880a989f4abc7f824cf"
+SNELL_ARMV7_URL="https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-armv7l.zip"
+SNELL_ARMV7_SHA256="14489f3e857569c8835dd3598b7ea6bca5371d4290ac7cf0f6c8dfb3381c1fb2"
+
+snell_artifact_for_arch() {
+    case "$1" in
+        amd64) echo "${SNELL_AMD64_URL} ${SNELL_AMD64_SHA256}" ;;
+        386) echo "${SNELL_386_URL} ${SNELL_386_SHA256}" ;;
+        arm64) echo "${SNELL_ARM64_URL} ${SNELL_ARM64_SHA256}" ;;
+        armv7) echo "${SNELL_ARMV7_URL} ${SNELL_ARMV7_SHA256}" ;;
+        *) return 2 ;;
+    esac
+}
+
+snell_verify_zip() {
+    local archive="$1"
+    local expected_sha="$2"
+    local actual_sha member
+
+    actual_sha="$(sha256sum "${archive}" | awk '{print $1}')" || return 1
+    [[ "${actual_sha}" == "${expected_sha}" ]] || return 1
+
+    member="$(unzip -Z1 "${archive}")" || return 1
+    case "${member}" in
+        /* | *..* | */*) return 1 ;;
+    esac
+    [[ "${member}" == "snell-server" ]] || return 1
+
+    unzip -Z -l "${archive}" | awk '
+        $NF == "snell-server" { entries++; regular = ($1 ~ /^-/) }
+        END { exit !(entries == 1 && regular) }
+    '
+}
+
+snell_download_and_install() {
+    local url="$1"
+    local expected_sha="$2"
+    local destination_root="$3"
+    local archive stage_dir extracted staged_binary
+
+    mkdir -p "${destination_root}" || return 1
+    archive="$(mktemp "${destination_root}/.snell-server.zip.XXXXXX")" || return 1
+    stage_dir="$(mktemp -d "${destination_root}/.snell-server.XXXXXX")" || {
+        rm -f "${archive}"
+        return 1
+    }
+    extracted="${stage_dir}/snell-server"
+    staged_binary="${stage_dir}/snell-server.ready"
+
+    if ! curl -fL --retry 5 --retry-delay 3 --connect-timeout 15 -o "${archive}" -- "${url}" \
+        || ! snell_verify_zip "${archive}" "${expected_sha}" \
+        || ! unzip -p "${archive}" snell-server > "${extracted}" \
+        || ! install -m 0755 "${extracted}" "${staged_binary}"; then
+        rm -f "${archive}" "${extracted}" "${staged_binary}"
+        rmdir "${stage_dir}" 2> /dev/null || true
+        return 1
+    fi
+
+    if ! mv -f "${staged_binary}" "${destination_root}/snell-server"; then
+        rm -f "${archive}" "${extracted}" "${staged_binary}"
+        rmdir "${stage_dir}" 2> /dev/null || true
+        return 1
+    fi
+    rm -f "${archive}" "${extracted}"
+    rmdir "${stage_dir}" 2> /dev/null || true
+}
+# SNELL_V5_HELPERS_END
+
 echo "Arch: $(arch)"
 
 # Simple helpers
@@ -180,29 +254,29 @@ install_base() {
     echo -e "${green}Updating and install dependency packages...${plain}"
     case "${release}" in
         ubuntu | debian | armbian)
-            apt-get update > /dev/null 2>&1 && apt-get install -y -q cron curl tar tzdata socat openssl > /dev/null 2>&1
+            apt-get update > /dev/null 2>&1 && apt-get install -y -q cron curl tar unzip tzdata socat openssl > /dev/null 2>&1
             ;;
         fedora | amzn | virtuozzo | rhel | almalinux | rocky | ol)
-            dnf makecache -y > /dev/null 2>&1 && dnf install -y -q cronie curl tar tzdata socat openssl > /dev/null 2>&1
+            dnf makecache -y > /dev/null 2>&1 && dnf install -y -q cronie curl tar unzip tzdata socat openssl > /dev/null 2>&1
             ;;
         centos)
             if [[ "${VERSION_ID}" =~ ^7 ]]; then
-                yum makecache -y > /dev/null 2>&1 && yum install -y -q cronie curl tar tzdata socat openssl > /dev/null 2>&1
+                yum makecache -y > /dev/null 2>&1 && yum install -y -q cronie curl tar unzip tzdata socat openssl > /dev/null 2>&1
             else
-                dnf makecache -y > /dev/null 2>&1 && dnf install -y -q cronie curl tar tzdata socat openssl > /dev/null 2>&1
+                dnf makecache -y > /dev/null 2>&1 && dnf install -y -q cronie curl tar unzip tzdata socat openssl > /dev/null 2>&1
             fi
             ;;
         arch | manjaro | parch)
-            pacman -Sy --noconfirm cronie curl tar tzdata socat openssl > /dev/null 2>&1
+            pacman -Sy --noconfirm cronie curl tar unzip tzdata socat openssl > /dev/null 2>&1
             ;;
         opensuse-tumbleweed | opensuse-leap)
-            zypper refresh > /dev/null 2>&1 && zypper -q install -y cron curl tar timezone socat openssl > /dev/null 2>&1
+            zypper refresh > /dev/null 2>&1 && zypper -q install -y cron curl tar unzip timezone socat openssl > /dev/null 2>&1
             ;;
         alpine)
-            apk update > /dev/null 2>&1 && apk add dcron curl tar tzdata socat openssl > /dev/null 2>&1
+            apk update > /dev/null 2>&1 && apk add dcron curl tar unzip tzdata socat openssl > /dev/null 2>&1
             ;;
         *)
-            apt-get update > /dev/null 2>&1 && apt install -y -q cron curl tar tzdata socat openssl > /dev/null 2>&1
+            apt-get update > /dev/null 2>&1 && apt install -y -q cron curl tar unzip tzdata socat openssl > /dev/null 2>&1
             ;;
     esac
 }
@@ -1081,6 +1155,12 @@ update_x-ui() {
         chmod +x bin/mtg-linux-arm > /dev/null 2>&1
     elif [[ -f bin/mtg-linux-$(arch) ]]; then
         chmod +x bin/mtg-linux-$(arch) > /dev/null 2>&1
+    fi
+
+    local snell_url snell_sha
+    read -r snell_url snell_sha < <(snell_artifact_for_arch "$(arch)") || _fail "ERROR: Unsupported Snell CPU architecture"
+    if ! snell_download_and_install "${snell_url}" "${snell_sha}" "${xui_folder}/bin/snell"; then
+        _fail "ERROR: Failed to install verified Snell v5.0.1"
     fi
 
     echo -e "${green}Downloading and installing x-ui.sh script...${plain}"

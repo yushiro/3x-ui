@@ -1,0 +1,4 @@
+9bea1c2b9e35b73b31634856c04d18c393072b9e5dcde6a32781d8b8f908c539  https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-amd64.zip
+6a3e30928315427d6f747f26408d0f74eb88f460344d0e1fcb3f7c32c708a09d  https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-i386.zip
+2f178bf5ac468ce1a130454efa40a0603fbbe4e47ecc4880a989f4abc7f824cf  https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-aarch64.zip
+14489f3e857569c8835dd3598b7ea6bca5371d4290ac7cf0f6c8dfb3381c1fb2  https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-armv7l.zip
