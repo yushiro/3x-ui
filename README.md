@@ -104,6 +104,32 @@ zero prompts, generating random credentials and writing them to
 
 **Architectures:** `amd64` · `386` · `arm64` (aarch64) · `armv7` · `armv6` · `armv5` · `s390x`.
 
+## Snell Server v5.0.1 (Host-only)
+
+Snell Server support is available only on a **Linux Host**. It runs each enabled
+Snell inbound as a local sidecar rather than through Xray, and needs a Linux
+kernel with **nftables** enabled, the `nft` command available, and permission to
+manage the dedicated `inet xui_snell` table. The Host checks reject Docker and
+other containers, non-Linux hosts, unsupported architectures, a missing or
+unverified local binary, and missing nftables permissions; those failures leave
+other protocols untouched.
+
+The panel supports exactly Snell **v5.0.1** on `amd64`, `386`, `arm64`, and
+`armv7`. Installation and upgrade are the only paths that download the fixed,
+checksum-verified v5.0.1 archive. At runtime the panel never downloads Snell:
+it requires the already verified local `bin/snell/snell-server` binary.
+
+A Snell inbound represents one shared address, port, PSK, and traffic quota.
+All Macs using that configuration consume the same inbound counters; create
+separate inbounds when you need separate quotas. The only client-facing output
+is **Copy Surge v5**, which produces the official Surge configuration line—there
+is no Snell URI, QR code, raw/JSON/Clash subscription, or per-client management.
+
+Manual disablement is retained by normal reconciliation. If a manually disabled
+Snell inbound must stay disabled when the monthly reset date arrives, set
+`trafficReset=never`; a monthly reset otherwise re-enables the inbound after its
+validation succeeds.
+
 ## Database Options
 
 3X-UI supports two backends, chosen during the install:

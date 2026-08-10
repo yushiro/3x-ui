@@ -29,6 +29,14 @@ snell_file_mode() {
     stat -c %a "$1" 2> /dev/null || stat -f %Lp "$1"
 }
 
+verify_snell_readme() {
+    local phrase
+    for phrase in 'Linux Host' nftables Docker non-Linux v5.0.1 Surge; do
+        grep -Fq "$phrase" "${REPO_ROOT}/README.md" \
+            || snell_test_fail "README missing: ${phrase}"
+    done
+}
+
 run_snell_helper_tests() {
     local script="$1"
     local test_root fake_bin helper_file destination actual
@@ -164,6 +172,8 @@ EOF
 
     echo "SNELL_HELPER_PASS: ${script}"
 }
+
+verify_snell_readme
 
 if [[ "${XUI_SMOKE_VERSION}" == "--snell-helper-tests" ]]; then
     run_snell_helper_tests "${REPO_ROOT}/install.sh"
