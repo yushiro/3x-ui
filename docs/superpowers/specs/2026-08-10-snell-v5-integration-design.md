@@ -1,431 +1,243 @@
-# Snell Server v5.0.1 Integration Design
+# Snell Server v5.0.1 集成设计
 
-**Status:** approved design
-**Completion boundary:** source changes and local verification only; this design does not include packaging, release, or production deployment.
+**状态：** 已批准设计
+**完成边界：** 仅包含源码变更与本地验证；本设计不包含打包、发布或生产部署。
 
-## Purpose and scope
+## 目的与范围
 
-Add **Snell Server v5.0.1** as a 3x-ui inbound protocol. Snell is not an
-Xray-core protocol, so each enabled Snell inbound is served by its own
-`snell-server` sidecar process. The implementation must support a hard,
-shared monthly traffic limit for that sidecar by measuring its TCP and UDP
-traffic with nftables.
+将 **Snell Server v5.0.1** 作为 3x-ui 入站协议加入。Snell 不是
+Xray-core 协议，因此每个已启用的 Snell 入站都由其独立的
+`snell-server` sidecar 进程提供服务。实现必须通过 nftables 统计该 sidecar 的
+TCP 与 UDP 流量，从而支持严格且共享的月度流量上限。
 
-One Snell inbound represents one shareable credential set, not one physical
-device or one 3x-ui client:
+一个 Snell 入站代表一套可共享的凭据，而不是一台实体设备或一个 3x-ui 客户端：
 
 ```text
-one inbound = one listen address and port + one PSK + one sidecar + one monthly quota
+一个入站 = 一个监听地址和端口 + 一个 PSK + 一个 sidecar + 一个每月配额
 Mac A ─┐
-Mac B ─┼── same address, port, and PSK ──> the same Snell inbound
+Mac B ─┼── 相同地址、端口和 PSK ──> 同一个 Snell 入站
 Mac C ─┘
 ```
 
-All devices using that configuration contribute to the same inbound's
-`up`/`down` total. Operators that need separate allowances create separate
-Snell inbounds, each with its own port, PSK, sidecar, and quota. There is no
-device-level accounting in this release.
+使用该配置的所有设备都会计入同一入站的 `up`/`down` 总量。需要独立额度的运营者应创建独立的
+Snell 入站，每个入站拥有自己的端口、PSK、sidecar 和配额。本版本不提供设备级统计。
 
-## Sources and fixed product decisions
+## 来源与固定产品决策
 
-- Snell Server is fixed to stable **v5.0.1**. v6 and every other Snell version
-  are outside this release.
-- The authoritative release page supplies the four v5.0.1 Linux assets and
-  describes Snell as a single binary (apart from glibc):
-  <https://kb.nssurge.com/surge-knowledge-base/release-notes/snell>.
-- The traffic design relies on nftables named counters. The nftables
-  documentation covers declaring a named counter with initial `packets` and
-  `bytes` values and listing its current values, which lets the database and
-  counter represent the same monthly absolute totals:
-  <https://wiki.nftables.org/wiki-nftables/index.php/Counters>.
+- Snell Server 固定使用稳定版 **v5.0.1**。v6 及其他 Snell 版本不在本次发布范围内。
+- 权威发布页面提供 v5.0.1 的四个 Linux 资源，并说明 Snell 是单一二进制文件（glibc 除外）：
+  <https://kb.nssurge.com/surge-knowledge-base/release-notes/snell>。
+- 流量设计依赖 nftables 命名计数器。nftables 文档说明了如何声明带初始 `packets` 和 `bytes` 值的命名计数器并列出当前值，使数据库与计数器能够表示相同的月度绝对总量：
+  <https://wiki.nftables.org/wiki-nftables/index.php/Counters>。
 
-The supported server platforms are Linux hosts only:
+支持的服务器平台仅为 Linux 主机：
 
-| Environment | Result |
+| 环境 | 结果 |
 | --- | --- |
-| Linux host with nftables and permission to manage nftables | Supported |
-| Docker container | Unsupported in this release |
-| Non-Linux host | Unsupported in this release |
-| Linux host without `nft`, an nftables kernel, or required privileges | Snell inbound start is refused with a clear prerequisite error |
+| 配有 nftables 且有权限管理 nftables 的 Linux 主机 | 支持 |
+| Docker 容器 | 本版本不支持 |
+| 非 Linux 主机 | 本版本不支持 |
+| 缺少 `nft`、nftables 内核或所需权限的 Linux 主机 | 拒绝启动 Snell 入站，并返回清晰的前置条件错误 |
 
-The README and all relevant UI/API error messages must state this Host-only
-limitation. No Snell action may alter the availability of Xray, MTProto, or
-another protocol.
+README 以及所有相关 UI/API 错误消息都必须说明此仅限主机（Host）的限制。任何 Snell 操作都不得影响 Xray、MTProto 或其他协议的可用性。
 
-## Architecture
+## 架构
 
 ```text
-3x-ui inbound record                  Host runtime
+3x-ui 入站记录                         Host 运行时
 ---------------------                 ----------------------------------------
 protocol: snell       ── settings ──>  0600 snell-<inbound-id>.conf
 listen/port                               │
 enable, up/down/total                     ▼
 trafficReset/day                      snell-server v5.0.1 sidecar
-                                            │ TCP and UDP on the inbound port
+                                            │ 入站端口上的 TCP 和 UDP
                                             ▼
-                                      nftables table inet xui_snell
-                                      counters snell_<id>_up/down
-                                            │ read absolute byte values
+                                      nftables 表 inet xui_snell
+                                      计数器 snell_<id>_up/down
+                                            │ 读取绝对字节值
                                             ▼
-                                      periodic Snell reconcile/traffic job
+                                      定期 Snell 对账/流量任务
                                             │
-                                            ├─ sync values to Inbound.Up/Down
-                                            └─ stop sidecar when quota is reached
+                                            ├─ 将值同步至 Inbound.Up/Down
+                                            └─ 达到配额时停止 sidecar
 ```
 
-The sidecar manager follows the existing MTProto sidecar pattern for process
-ownership, reconciliation, crash recovery, and orphan cleanup. It remains a
-separate Snell package/service: it must not pretend that Snell is an Xray
-inbound or route Snell configuration through Xray.
+sidecar 管理器遵循现有 MTProto sidecar 模式，负责进程所有权、对账、崩溃恢复和孤儿清理。它仍是独立的 Snell 包/服务：不得将 Snell 冒充为 Xray 入站，也不得通过 Xray 路由 Snell 配置。
 
-### Components
+### 组件
 
-1. **Inbound model and validation.** Register `snell` as a protocol while
-   retaining the existing inbound fields `listen`, `port`, `enable`, `up`,
-   `down`, `total`, `trafficReset`, `trafficResetDay`, and `remark`. Snell
-   must participate in the existing port-conflict checks.
-2. **Snell settings.** The first release stores only `psk` in the inbound
-   `settings` JSON. A cryptographically secure PSK is generated for a new
-   inbound; the operator may edit it or explicitly generate a replacement.
-   No `clients` array and no `ClientTraffic` records are created.
-3. **Binary installer.** Installation and upgrade obtain the selected official
-   v5.0.1 Linux ZIP once, verify it against a fixed SHA-256 value for that
-   exact asset, extract it, and install the executable under `bin/snell/`.
-   The runtime never downloads an executable. The binary is not committed to
-   Git. An absent hash entry, a mismatched digest, an unsupported architecture,
-   or an invalid archive fails closed.
-4. **Sidecar manager.** Own one process per enabled valid Snell inbound;
-   render its configuration to `bin/snell/config/snell-<inbound-id>.conf`;
-   and serialize mutations for each inbound so update, reconcile, quota stop,
-   and delete cannot race each other.
-5. **nftables manager.** Own only the dedicated `inet xui_snell` table and its
-   chains, rules, and named counters. It never flushes, lists for mutation, or
-   rewrites user firewall tables.
-6. **Traffic/reconciliation job.** Reconciles desired sidecars, synchronizes
-   absolute counter totals, enforces the hard quota, and applies the Snell-specific
-   monthly reset behavior described below.
-7. **Inbound UI.** Adds a Snell form, its read-only traffic display, and an
-   explicit Surge configuration copy action. It adds no client-management UI.
+1. **入站模型与校验。** 注册 `snell` 协议，同时保留现有入站字段 `listen`、`port`、`enable`、`up`、`down`、`total`、`trafficReset`、`trafficResetDay` 和 `remark`。Snell 必须参与现有端口冲突检查。
+2. **Snell 设置。** 首个版本只在入站 `settings` JSON 中存储 `psk`。创建新入站时生成密码学安全的 PSK；运营者可编辑，或显式生成替换值。不创建 `clients` 数组，也不创建 `ClientTraffic` 记录。
+3. **二进制安装器。** 安装和升级只获取一次选定的官方 v5.0.1 Linux ZIP，针对该精确资源使用固定 SHA-256 值校验，解压后将可执行文件安装到 `bin/snell/`。运行时绝不下载可执行文件。二进制文件不得提交到 Git。缺少哈希条目、摘要不匹配、不支持的架构或无效归档都必须失败并保持安全状态。
+4. **sidecar 管理器。** 每个启用且有效的 Snell 入站拥有一个进程；将配置渲染到 `bin/snell/config/snell-<inbound-id>.conf`；并串行化每个入站的变更，使更新、对账、配额停止和删除不会相互竞争。
+5. **nftables 管理器。** 仅管理专用的 `inet xui_snell` 表及其链、规则和命名计数器。绝不刷新、列出后用于修改或重写用户的防火墙表。
+6. **流量/对账任务。** 对账所需 sidecar、同步绝对计数器总量、执行硬配额，并应用下述 Snell 专属的月度重置行为。
+7. **入站 UI。** 增加 Snell 表单、只读流量显示和显式的 Surge 配置复制操作。不增加客户端管理 UI。
 
-## Installation and binary management
+## 安装与二进制管理
 
-Supported `runtime.GOARCH` values map exactly to these official v5.0.1 assets:
+支持的 `runtime.GOARCH` 值严格映射到以下官方 v5.0.1 资源：
 
-| Architecture | Asset |
+| 架构 | 资源 |
 | --- | --- |
 | `amd64` | `https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-amd64.zip` |
 | `386` | `https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-i386.zip` |
 | `arm64` | `https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-aarch64.zip` |
-| `arm` (armv7-compatible) | `https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-armv7l.zip` |
+| `arm`（兼容 armv7） | `https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-armv7l.zip` |
 
-The implementation must keep an immutable SHA-256 mapping for those four URL
-strings and compare the downloaded archive before extraction. No mutable
-“latest” URL or fallback version is permitted. Archive extraction must reject
-unexpected paths, install the executable atomically, and set executable
-permissions. A failed install must leave the previously verified binary intact.
+实现必须为上述四个 URL 字符串保留不可变的 SHA-256 映射，并在解压前校验下载的归档。不得使用可变的“latest”URL 或回退版本。归档解压必须拒绝意外路径，原子安装可执行文件并设置可执行权限。安装失败时，之前已验证的二进制文件必须保持不变。
 
-At runtime, an enabled Snell inbound first checks Linux, the installed binary,
-`nft`, nftables access, and the ability to create its own rules. Missing
-prerequisites prevent the enable/start transition and return a message naming
-the unmet requirement; they must not cause an on-demand download.
+运行时，已启用的 Snell 入站首先检查 Linux、已安装的二进制文件、`nft`、nftables 访问权限以及创建自身规则的能力。缺少前置条件会阻止启用/启动转换，并返回指出未满足要求的消息；不得按需下载。
 
-## Configuration and client output
+## 配置与客户端输出
 
-The rendered sidecar configuration derives its listener from the common inbound
-`listen` and `port` fields and its only protocol-specific value from
-`settings.psk`. It is written with mode `0600` in
-`bin/snell/config/snell-<inbound-id>.conf`. Configuration syntax and the
-sidecar invocation must be validated against the downloaded v5.0.1 binary.
+渲染的 sidecar 配置从通用入站 `listen` 和 `port` 字段获取监听器，唯一的协议专属值来自 `settings.psk`。配置以 `0600` 模式写入 `bin/snell/config/snell-<inbound-id>.conf`。必须针对下载的 v5.0.1 二进制文件验证配置语法和 sidecar 调用方式。
 
-The UI supplies exactly one client output: **Copy Surge configuration**. It
-uses the existing inbound share-address resolution and emits this complete
-single-line form:
+UI 只提供一种客户端输出：**复制 Surge 配置**。它使用现有的入站共享地址解析，并生成以下完整单行格式：
 
 ```ini
 <name> = snell, <host>, <port>, psk=<psk>, version=5
 ```
 
-`<name>` is the inbound display name and `<host>` is the resolved shared server
-address. The copy output is not a URI and is not a subscription entry.
+`<name>` 是入站显示名称，`<host>` 是解析后的共享服务器地址。复制输出不是 URI，也不是订阅条目。
 
-The following must remain excluded:
+以下内容必须继续排除：
 
-- subscriptions and “export all links”;
-- Clash and other non-Surge output;
-- QR-code generation;
-- a non-official Snell URI scheme;
-- client records, per-client links, and the general Clients page.
+- 订阅和“导出所有链接”；
+- Clash 及其他非 Surge 输出；
+- 二维码生成；
+- 非官方 Snell URI 方案；
+- 客户端记录、按客户端链接和通用“客户端”页面。
 
-## nftables traffic accounting
+## nftables 流量统计
 
-The manager creates a dedicated `inet xui_snell` table. For each inbound ID
-`N`, it creates these named counters:
+管理器创建专用的 `inet xui_snell` 表。对于每个入站 ID `N`，创建以下命名计数器：
 
 ```text
 snell_N_up
 snell_N_down
 ```
 
-The table has dedicated base chains that make no verdict decision, so existing
-firewall policy remains in control. Rules count both TCP and UDP:
+该表包含专用的基础链，不作 verdict 决策，因此仍由现有防火墙策略负责决策。规则统计 TCP 和 UDP：
 
-| Direction | Packet match | Counter | Inbound field |
+| 方向 | 数据包匹配 | 计数器 | 入站字段 |
 | --- | --- | --- | --- |
-| Client to Snell host | destination port is the inbound port | `snell_N_up` | `up` |
-| Snell host to client | source port is the inbound port | `snell_N_down` | `down` |
+| 客户端到 Snell Host | 目标端口是入站端口 | `snell_N_up` | `up` |
+| Snell Host 到客户端 | 源端口是入站端口 | `snell_N_down` | `down` |
 
-The rules must be valid for both IPv4 and IPv6 through the `inet` family. They
-are intended for a Snell process directly listening on the Host port; this
-release does not support an extra container, NAT-only, or user-space relay
-deployment as a substitute.
+通过 `inet` 协议族，规则必须同时对 IPv4 和 IPv6 有效。规则面向直接监听 Host 端口的 Snell 进程；本版本不支持用额外容器、仅 NAT 或用户态中继（relay）部署替代。
 
-Each named counter is the absolute byte total for the inbound's current traffic
-reset period. A regular collection interval only lists `snell_N_up` and
-`snell_N_down`, then writes their returned byte values directly to
-`Inbound.Up` and `Inbound.Down`; it never resets a counter, calculates a
-separate per-poll value, or keeps accounting state in memory. If the database
-write fails, the counter remains unchanged and the next collection naturally
-retries the same absolute values. No accounting baseline column or traffic
-journal table is added in this release.
+每个命名计数器都是该入站当前流量重置周期的绝对字节总量。常规采集间隔只列出 `snell_N_up` 和 `snell_N_down`，然后将返回的字节值直接写入 `Inbound.Up` 和 `Inbound.Down`；绝不重置计数器、计算独立的每次轮询值，或在内存中保存统计状态。若数据库写入失败，计数器保持不变，下一次采集自然会重试相同的绝对值。本版本不增加统计基线字段或流量日志表。
 
-New counters start from the inbound's current database values, for example
-`snell_N_up` starts with `packets 0 bytes Inbound.Up` and `snell_N_down` starts
-with `packets 0 bytes Inbound.Down`. This seed rule applies whenever an object
-must be created or rebuilt. Thus an enabled inbound that changes port, has its
-managed rules restored, or is reconciled after a panel/Host restart retains the
-monthly total rather than double-counting or rewinding it.
+新计数器从入站当前数据库值开始，例如 `snell_N_up` 以 `packets 0 bytes Inbound.Up` 开始，`snell_N_down` 以 `packets 0 bytes Inbound.Down` 开始。该种子规则适用于必须创建或重建对象的所有情况。因此，变更端口、托管规则被恢复，或面板/Host 重启后重新对账的启用入站，都能保留月度总量，不会重复统计或回退。
 
-When the manager starts, it reconciles its own table: it lists existing managed
-counters first, retains valid counters whose values are at least the database
-value, creates only missing objects with the database seed, and removes only
-objects belonging to nonexistent Snell inbounds. It never performs a
-system-wide nftables flush. If a counter is missing while its sidecar could be
-serving traffic, the manager first stops that sidecar, creates the seeded
-counter/rule, and then restores the sidecar so no live interval is silently
-unmetered.
+管理器启动时对账自身的表：先列出已有的托管计数器，保留值不小于数据库值的有效计数器；仅用数据库种子创建缺失对象；并仅删除属于不存在 Snell 入站的对象。绝不执行全系统 nftables 刷新。如果计数器缺失而其 sidecar 可能正在提供流量，管理器必须先停止该 sidecar，创建带种子的计数器/规则，再恢复 sidecar，从而不会有活跃间隔被悄然漏记。
 
-A counter value below the database `up` or `down` value is an accounting
-anomaly, except during the serialized reset operation described below. The
-manager must stop that inbound's sidecar, rebuild only the lower counter/rule
-with the database value as its initial bytes, and then resume the sidecar only
-when the inbound remains enabled and within quota. It must never overwrite the
-larger database value with the lower counter value. Before a port change or
-delete, the manager stops the sidecar and synchronizes the final absolute
-counter values. A port change then recreates counters seeded with those values;
-delete removes only that inbound's rules and counters.
+计数器值低于数据库 `up` 或 `down` 值属于统计异常，但下述串行化重置操作期间除外。管理器必须停止该入站的 sidecar，仅用数据库值作为初始字节重建较低的计数器/规则，并且只有在入站仍启用且未超配额时才恢复 sidecar。绝不能用较低的计数器值覆盖较大的数据库值。变更端口或删除前，管理器停止 sidecar 并同步最终绝对计数器值。变更端口随后用这些值作为种子重新创建计数器；删除只移除该入站的规则和计数器。
 
-Counters and database traffic are reset together only by the monthly reset or
-an explicit manual inbound traffic-reset operation. Both operations serialize
-with collection and lifecycle changes and stop the affected sidecar. The reset
-first sets the two named counters to zero and then writes both database values
-as zero. If the database write fails, the reset reports failure; the normal
-lower-counter recovery restores the counters from the still-nonzero database
-values, so the reset does not silently create a lower total. A successful reset
-therefore leaves both stores at zero before applying its restart behavior. A
-manual reset preserves the inbound's enable state; the monthly reset follows
-the automatic recovery rules below.
+只有月度重置或显式手动入站流量重置会同时重置计数器和数据库流量。两种操作都与采集及生命周期变更串行执行，并停止受影响的 sidecar。重置先将两个命名计数器设为零，再将两个数据库值写为零。若数据库写入失败，重置报告失败；正常的低计数器恢复会从仍为非零的数据库值恢复计数器，因此重置不会悄然产生较低总量。成功重置后，两处存储均为零，再应用其重启行为。手动重置保留入站的启用状态；月度重置遵循下述自动恢复规则。
 
-## Lifecycle and quota behavior
+## 生命周期与配额行为
 
-All sidecar and nftables operations are isolated per inbound. Failure for one
-Snell inbound is recorded and surfaced for that inbound only.
+所有 sidecar 与 nftables 操作都按入站隔离。一个 Snell 入站的失败只对该入站记录并展示。
 
-### Create, enable, update, disable, and delete
+### 创建、启用、更新、禁用与删除
 
-1. **Create or enable:** validate the host prerequisites and settings, ensure
-   the verified binary and counters exist, write the `0600` configuration, and
-   start one sidecar. An already-consumed nonzero `total` is enforced before
-   starting, so an enabled inbound cannot remain running above its quota.
-2. **Update listener, port, or PSK:** serialize the operation; stop the old
-   process; synchronize its final absolute counter values; replace configuration
-   and affected counter rules seeded from those values; then start the
-   replacement process if it remains enabled and within quota.
-3. **Manual disable:** stop the process while retaining its configuration,
-   counters, and accumulated monthly traffic. It does not create a special
-   disable reason.
-4. **Delete:** stop the process, synchronize final absolute traffic where
-   possible, delete its configuration and only its named counters/rules, and
-   remove the inbound.
-5. **Unexpected exit:** while the inbound is enabled and below quota, retry
-   sidecar start with bounded exponential backoff. A successful intentional
-   stop, a disabled inbound, and a quota stop must not schedule a restart.
-6. **Startup/orphan recovery:** reconcile database state with managed
-   processes; terminate orphaned Snell processes that carry the manager's
-   identifiable invocation/configuration; then recreate desired enabled
-   processes. It must never kill an unrelated `snell-server` process.
+1. **创建或启用：** 校验 Host 前置条件和设置，确保已验证的二进制文件和计数器存在，写入 `0600` 配置，并启动一个 sidecar。启动前执行已经消耗的非零 `total`，因此已启用入站不能在超过配额时继续运行。
+2. **更新监听器、端口或 PSK：** 串行执行操作；停止旧进程；同步其最终绝对计数器值；替换配置和受影响的计数器规则，并以这些值为种子；若仍启用且未超配额则启动替代进程。
+3. **手动禁用：** 停止进程，同时保留配置、计数器和累计月度流量。不创建特殊禁用原因。
+4. **删除：** 停止进程，尽可能同步最终绝对流量，删除其配置及仅属于它的命名计数器/规则，然后移除入站。
+5. **意外退出：** 入站启用且未超配额时，以有界指数退避重试启动 sidecar。成功的主动停止、已禁用入站和因配额停止都不得安排重启。
+6. **启动/孤儿恢复：** 将数据库状态与托管进程对账；终止带有管理器可识别调用/配置的孤儿 Snell 进程；然后重新创建所需的启用进程。绝不能杀死无关的 `snell-server` 进程。
 
-### Hard traffic quota
+### 硬流量配额
 
-After synchronizing each counter's absolute values, the traffic job checks
-`total`. A zero or
-otherwise existing “unlimited” total preserves the project's current unlimited
-semantics. For a positive total, when `up + down >= total`, the job must:
+每个计数器的绝对值同步后，流量任务检查 `total`。零或其他已有的“无限”total 保留项目当前的无限语义。对于正数 total，当 `up + down >= total` 时，任务必须：
 
-1. set the inbound `enable` field to `false`;
-2. stop the corresponding Snell sidecar; and
-3. leave its accumulated traffic visible.
+1. 将入站 `enable` 字段设为 `false`；
+2. 停止对应的 Snell sidecar；
+3. 保留其累计流量以供查看。
 
-This is a hard operational limit, not only a warning. TCP and UDP stop together
-because the entire sidecar stops.
+这是硬性的运行上限，不只是警告。由于整个 sidecar 停止，TCP 和 UDP 会同时停止。
 
-### Monthly reset and automatic recovery
+### 月度重置与自动恢复
 
-For a Snell inbound whose `trafficReset` is `monthly`, the existing monthly
-schedule and its `trafficResetDay` determine when the reset runs. On that date,
-the Snell-specific extension to the periodic reset job must:
+对于 `trafficReset` 为 `monthly` 的 Snell 入站，现有月度计划和 `trafficResetDay` 决定重置时间。在该日期，定期重置任务的 Snell 专属扩展必须：
 
-1. stop the sidecar if it is running and enter the serialized reset operation;
-2. reset its nftables counters and inbound `up`/`down` values to zero as
-   described in the accounting section;
-3. set inbound `enable` to `true` unconditionally; and
-4. recreate/start the sidecar after prerequisites and settings validate.
+1. 若 sidecar 正在运行则停止，并进入串行化重置操作；
+2. 按统计部分所述将 nftables 计数器和入站 `up`/`down` 值重置为零；
+3. 无条件将入站 `enable` 设为 `true`；
+4. 在前置条件和设置校验通过后重新创建/启动 sidecar。
 
-There is deliberately no `disableReason`, `quotaDisabled`, or other database
-field. Consequently, a manually disabled Snell inbound with a monthly reset is
-also re-enabled on its next reset date. To keep a Snell inbound disabled across
-monthly reset dates, an operator must set `trafficReset` to `never` before
-disabling it. This automatic recovery applies only to Snell; it must not alter
-the existing reset behavior of Xray, MTProto, or their clients.
+这里有意不设置 `disableReason`、`quotaDisabled` 或其他数据库字段。因此，手动禁用且设置月度重置的 Snell 入站也会在下一次重置日期重新启用。若要让 Snell 入站跨越月度重置日期保持禁用，运营者必须在禁用前将 `trafficReset` 设为 `never`。此自动恢复只适用于 Snell，不得改变 Xray、MTProto 或其客户端现有的重置行为。
 
-## Errors, safety, and observability
+## 错误、安全与可观测性
 
-- Run `nft` and `snell-server` through argument-based process execution; never
-  construct a shell command from an inbound value.
-- Validate listener/port, PSK, inbound ID, and counter names before using them
-  in a command or a configuration file. Counter names use the numeric database
-  ID only.
-- Treat missing binary, unsupported platform/architecture, failed digest,
-  nftables absence, insufficient privilege, invalid PSK, port collision,
-  configuration write failure, and process start failure as clear per-inbound
-  errors. The error text must say that Docker and non-Linux hosts are unsupported
-  where that is the cause.
-- Keep PSK-bearing configuration files at `0600`; do not write PSKs to logs or
-  error text. List endpoints must not return a plaintext PSK. An authenticated
-  inbound detail/edit response and the explicit copy action may expose it to the
-  authorized operator.
-- Use bounded exponential backoff for crashes, reset backoff after a stable
-  running period, and log the inbound ID and safe failure category. Avoid a
-  restart storm caused by a bad configuration or missing prerequisite.
-- Configuration changes, quota stops, reset starts, and process-exit callbacks
-  must be serialized per inbound. Collection must not revive a sidecar after a
-  concurrent manual disable, delete, or quota stop.
+- 通过基于参数的进程执行运行 `nft` 和 `snell-server`；绝不从入站值构造 shell 命令。
+- 在命令或配置文件中使用前校验监听器/端口、PSK、入站 ID 和计数器名称。计数器名称只能使用数据库数字 ID。
+- 将二进制文件缺失、不支持的平台/架构、摘要校验失败、缺少 nftables、权限不足、PSK 无效、端口冲突、配置写入失败和进程启动失败视为清晰的按入站错误。原因是 Docker 或非 Linux Host 时，错误文本必须说明不支持这些环境。
+- 含 PSK 的配置文件保持 `0600`；不得将 PSK 写入日志或错误文本。列表接口不得返回明文 PSK。经认证的入站详情/编辑响应及显式复制操作可以向获授权的运营者公开它。
+- 对崩溃使用有界指数退避，在稳定运行一段时间后重置退避，并记录入站 ID 和安全的失败类别。避免由错误配置或缺少前置条件导致重启风暴。
+- 配置变更、配额停止、重置启动和进程退出回调必须按入站串行化。采集不得在并发手动禁用、删除或配额停止后重新唤醒 sidecar。
 
-## UI and API behavior
+## UI 与 API 行为
 
-The Inbounds form adds `snell` to the supported protocol selector. Its form
-contains the common inbound traffic/reset fields and one Snell-specific PSK
-field with generate/regenerate and edit controls. It does not show transport,
-TLS, Xray sniffing, or multi-client controls that do not apply to Snell.
+入站表单将 `snell` 加入支持的协议选择器。表单包含通用入站流量/重置字段，以及一个带生成/重新生成和编辑控件的 Snell 专属 PSK 字段。不显示不适用于 Snell 的传输、TLS、Xray 嗅探或多客户端控件。
 
-Inbound list/detail UI identifies Snell traffic as shared inbound traffic. The
-only sharing affordance is the explicit **Copy Surge configuration** action
-defined above. APIs validate `settings.psk`, omit the PSK from list responses,
-and preserve it when an update does not intentionally replace it. Existing
-subscription APIs must continue to ignore Snell.
+入站列表/详情 UI 将 Snell 流量标识为共享入站流量。唯一的分享入口是上文定义的显式**复制 Surge 配置**操作。API 校验 `settings.psk`，从列表响应中排除 PSK，并在更新未有意替换时保留它。现有订阅 API 必须继续忽略 Snell。
 
-## Validation strategy
+## 验证策略
 
-Tests must be deterministic and must not require a real Snell download,
-privileged nftables host, or public network connection. Inject the binary
-installer, process launcher, clock/scheduler, and nftables runner behind small
-interfaces and use fakes in unit/service tests.
+测试必须确定性执行，并且不得要求真实 Snell 下载、具备特权的 nftables Host 或公共网络连接。在单元/服务测试中，应通过小型接口注入二进制安装器、进程启动器、时钟/调度器和 nftables 执行器，并使用伪实现（fake）。
 
-Required coverage:
+必须覆盖：
 
-1. Snell settings validation, cryptographically secure PSK generation, and
-   default inbound creation.
-2. Rendered configuration permissions and safe process arguments.
-3. The architecture-to-official-URL table plus nonempty fixed SHA-256 mappings;
-   unsupported architecture, absent mapping, mismatched digest, malformed ZIP,
-   and failed replacement leave no unverified executable installed.
-4. Sidecar create, enable, listener/port/PSK update, manual disable, delete,
-   concurrent operation serialization, intentional stop, bounded crash restart,
-   and identified-orphan cleanup using a fake `snell-server`.
-5. nftables rule generation for TCP and UDP in both directions, counter-name
-   validation, initial-byte seeding, and parsing/listing of absolute counts;
-   cleanup of stale Snell-only objects; and no command that flushes or modifies
-   another table.
-6. Absolute-value synchronization writes named-counter bytes to the inbound;
-   a transient database failure is retried by the next unchanged counter read;
-   counter creation/recreation seeds from the database; and a counter lower
-   than the database stops, rebuilds, and only then resumes that sidecar without
-   an accounting rollback. Cover port update, missing-rule recovery, and panel
-   restart so none duplicate or omit already recorded monthly traffic.
-7. Quota exhaustion stops only the matching process and has no impact on a
-   second Snell inbound or an Xray/MTProto inbound. Monthly reset and explicit
-   manual reset clear both database values and named counters; monthly reset
-   unconditionally enables and starts a valid Snell inbound, including one that
-   had been manually disabled, while manual reset preserves enable state. Verify
-   that no existing protocol's periodic-reset behavior changes.
-8. Panel restart reconciliation, unavailable nftables, missing binary, process
-   start failure, and malformed settings produce isolated errors and never
-   start an unsupported Docker/non-Linux deployment.
-9. Frontend schema, defaults, form validation, protocol capability exclusions,
-   and exact Surge copy output. Verify Snell stays absent from client pages,
-   subscriptions, QR output, Clash output, and URI/link export.
-10. README coverage of Linux Host-only support, nftables/privilege prerequisites,
-    Docker/non-Linux non-support, and Surge-only configuration copying.
+1. Snell 设置校验、密码学安全的 PSK 生成和默认入站创建。
+2. 渲染配置的权限和安全的进程参数。
+3. 架构到官方 URL 的映射表及非空固定 SHA-256 映射；不支持的架构、缺少映射、摘要不匹配、格式错误的 ZIP 和替换失败都不得留下未验证的已安装可执行文件。
+4. 使用伪 `snell-server` 覆盖 sidecar 创建、启用、监听器/端口/PSK 更新、手动禁用、删除、并发操作串行化、主动停止、有界崩溃重启和已识别孤儿清理。
+5. 覆盖双向 TCP 和 UDP 的 nftables 规则生成、计数器名称校验、初始字节种子以及绝对计数解析/列出；清理过期的仅 Snell 对象；且不得有刷新或修改其他表的命令。
+6. 绝对值同步将命名计数器字节写入入站；瞬时数据库失败由下一次不变的计数器读取重试；计数器创建/重建以数据库值为种子；低于数据库值的计数器会停止、重建，然后才恢复 sidecar，且不发生统计回滚。覆盖端口更新、缺失规则恢复和面板重启，确保已记录的月度流量不会重复或遗漏。
+7. 配额耗尽只停止匹配的进程，不影响第二个 Snell 入站或 Xray/MTProto 入站。月度重置和显式手动重置清除数据库值及命名计数器；月度重置无条件启用并启动有效 Snell 入站（包括之前手动禁用的入站），而手动重置保留启用状态。验证任何现有协议的定期重置行为均未改变。
+8. 面板重启对账、nftables 不可用、二进制缺失、进程启动失败和格式错误的设置会产生隔离错误，且绝不启动不支持的 Docker/非 Linux 部署。
+9. 前端模式（schema）、默认值、表单校验、协议能力排除和精确的 Surge 复制输出。验证 Snell 不出现在客户端页面、订阅、二维码输出、Clash 输出及 URI/链接导出中。
+10. README 覆盖仅限 Linux 主机的支持、nftables/权限前置条件、Docker/非 Linux 不支持以及仅 Surge 配置复制。
 
-## Acceptance criteria
+## 验收标准
 
-The implementation is complete when all of the following are true:
+满足以下全部条件时，视为实现完成：
 
-1. An operator on a supported Linux Host can install a verified official Snell
-   v5.0.1 binary for `amd64`, `386`, `arm64`, or `arm`, create a PSK-backed
-   Snell inbound, and run exactly one sidecar for it.
-2. Multiple Macs using the same copied Surge line share that inbound and its
-   single `up + down` monthly quota; a second quota is represented by a second
-   inbound rather than a client record.
-3. TCP and UDP bytes for each direct Host listener are accounted separately as
-   absolute inbound `up` and `down` values using only `inet xui_snell` named
-   counters. Regular collection never resets a counter; counter creation,
-   recovery, and port replacement seed it with the existing database total.
-4. Reaching a positive inbound `total` disables the inbound and stops its
-   sidecar without stopping another sidecar or any Xray/MTProto service.
-5. A monthly reset clears Snell traffic and counters, sets `enable=true`, and
-   restarts a valid Snell sidecar even when it was manually disabled before the
-   reset; an explicit manual reset clears both stores while preserving enable
-   state; and `trafficReset=never` is the documented way to keep it disabled.
-6. PSKs are generated securely, editable, stored in `0600` runtime
-   configuration, omitted from list APIs/logs, and available only through
-   authorized detail/edit or explicit copy flows.
-7. The only client output is the exact Surge configuration line with
-   `version=5`; Snell is absent from subscriptions, QR, Clash, and URI export.
-8. Docker, non-Linux, unsupported architectures, absent/unverified binary, and
-   nftables privilege failures fail with clear isolated errors and are documented
-   in the README.
-9. The focused tests above pass, and existing affected protocol tests show no
-   changed behavior outside this design.
+1. 支持的 Linux 主机（Host）上的运营者可以为 `amd64`、`386`、`arm64` 或 `arm` 安装经过验证的官方 Snell v5.0.1 二进制文件，创建基于 PSK 的 Snell 入站，并为其运行恰好一个 sidecar。
+2. 使用同一复制 Surge 行的多台 Mac 共享该入站及其单一 `up + down` 月度配额；第二个配额通过第二个入站表示，而不是客户端记录。
+3. 每个直接 Host 监听器的 TCP 和 UDP 字节都使用仅 `inet xui_snell` 命名计数器，分别作为绝对入站 `up` 和 `down` 值统计。常规采集不重置计数器；计数器创建、恢复和端口替换都以既有数据库总量为种子。
+4. 达到正数入站 `total` 时禁用入站并停止其 sidecar，同时不停止其他 sidecar 或任何 Xray/MTProto 服务。
+5. 月度重置清除 Snell 流量和计数器、设置 `enable=true`，并重新启动有效 Snell sidecar，即使它在重置前被手动禁用；显式手动重置清除两处存储并保留启用状态；文档说明使用 `trafficReset=never` 使其保持禁用。
+6. PSK 安全生成、可编辑、存储在 `0600` 运行时配置中，从列表 API/日志中排除，并只通过授权详情/编辑或显式复制流程提供。
+7. 唯一客户端输出是带 `version=5` 的精确 Surge 配置行；Snell 不出现在订阅、二维码、Clash 和 URI 导出中。
+8. Docker、非 Linux、不支持的架构、缺失/未验证的二进制文件以及 nftables 权限失败都会产生清晰的隔离错误，并在 README 中记录。
+9. 上述聚焦测试通过，且受影响的既有协议测试显示设计范围之外的行为未改变。
 
-## Explicit non-goals
+## 明确的非目标
 
-- Snell v6, beta releases, alternate server versions, or a mutable “latest”
-  channel.
-- Docker, Kubernetes, macOS, Windows, or non-Linux server support.
-- A container relay, user-space TCP/UDP proxy, or an alternative to nftables
-  accounting.
-- Per-device, per-user, or per-client traffic accounting; `ClientTraffic`; or
-  a synthetic Snell client model.
-- Xray-core support, Xray transports/security settings, Xray routing, or
-  changing Xray behavior.
-- Subscription integration, share links/URIs, QR codes, Clash conversion, or
-  any non-Surge client output.
-- Snell advanced options such as egress-interface, custom DNS, ShadowTLS, or
-  obfuscation.
-- New `disableReason`, `quotaDisabled`, or similar persistent state, database
-  migration, or a generalized change to existing protocol reset semantics.
-- Changing user-managed nftables tables, chains, rules, policies, or unrelated
-  `snell-server` processes.
+- Snell v6、beta 版本、其他服务器版本或可变的“latest”渠道。
+- Docker、Kubernetes、macOS、Windows 或非 Linux 服务器支持。
+- 容器 relay、用户态 TCP/UDP 代理或 nftables 统计的替代方案。
+- 按设备、用户或客户端统计流量；`ClientTraffic`；或合成的 Snell 客户端模型。
+- Xray-core 支持、Xray 传输/安全设置、Xray 路由或改变 Xray 行为。
+- 订阅集成、分享链接/URI、二维码、Clash 转换或任何非 Surge 客户端输出。
+- Snell 高级选项，例如 egress-interface、自定义 DNS、ShadowTLS 或混淆。
+- 新增 `disableReason`、`quotaDisabled` 或类似持久状态；数据库迁移；或对现有协议重置语义的通用变更。
+- 更改用户管理的 nftables 表、链、规则、策略或无关的 `snell-server` 进程。
 
-## Risks and contained mitigations
+## 风险与限定缓解措施
 
-| Risk | Contained mitigation |
+| 风险 | 限定缓解措施 |
 | --- | --- |
-| Host lacks nftables privileges | Refuse that inbound start with a prerequisite error; do not provide a lower-fidelity fallback. |
-| Sidecar crash/restart loop | Bound retries with exponential backoff and stop scheduling when disabled or quota-stopped. |
-| Misconfigured update loses a live listener | Serialize per-inbound lifecycle operations, synchronize final absolute totals before rule replacement, seed the replacement counters from those totals, and start only after validation. |
-| User firewall interference | Use only `inet xui_snell`, pass no verdict, and never flush or mutate another table. |
-| PSK disclosure | Use `0600` files, redact logs/list responses, and restrict plaintext to authorized edit/copy flows. |
-| Accounting write is temporarily unavailable | Leave the named counter unchanged; the next collection writes the same absolute value, with no per-poll in-memory accounting state or database schema required. |
-| Counter value falls below the database total | Stop only that sidecar, rebuild its own counter/rule seeded from the larger database value, then resume only if enabled and under quota. |
-| Shared credentials cannot identify Macs | Treat the inbound as a deliberately shared allowance; require separate inbounds for separate allowances. |
+| Host 缺少 nftables 权限 | 使用前置条件错误拒绝该入站启动；不提供低精度回退方案。 |
+| sidecar 崩溃/重启循环 | 使用指数退避限制重试，并在禁用或因配额停止时停止调度。 |
+| 配置错误的更新丢失活动监听器 | 串行化每个入站的生命周期操作，在替换规则前同步最终绝对总量，以这些总量为种子替换计数器，并仅在校验后启动。 |
+| 用户防火墙干扰 | 仅使用 `inet xui_snell`，不传递 verdict，且绝不刷新或修改其他表。 |
+| PSK 泄露 | 使用 `0600` 文件，编辑/列表响应中日志脱敏，并将明文限制在授权的编辑/复制流程。 |
+| 统计写入暂时不可用 | 保持命名计数器不变；下一次采集写入相同绝对值，不需要每次轮询的内存统计状态或数据库模式（schema）。 |
+| 计数器值低于数据库总量 | 仅停止该 sidecar，用较大的数据库值作为种子重建自身计数器/规则，并且仅在启用且未超配额时恢复。 |
+| 共享凭据无法识别 Mac | 将入站视为有意共享的额度；需要独立额度时创建独立入站。 |
