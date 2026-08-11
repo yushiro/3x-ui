@@ -15,8 +15,9 @@ func RenderConfig(instance Instance) ([]byte, error) {
 	if err := validateInstance(instance); err != nil {
 		return nil, err
 	}
-	return []byte(fmt.Sprintf("[Snell Server]\ninterface = %s\nport = %d\npsk = %s\n",
-		strconv.Quote(instance.Listen), instance.Port, strconv.Quote(instance.PSK))), nil
+	listen := net.JoinHostPort(instance.Listen, strconv.Itoa(instance.Port))
+	return []byte(fmt.Sprintf("[snell-server]\nlisten = %s\npsk = %s\nipv6 = false\n",
+		listen, strconv.Quote(instance.PSK))), nil
 }
 
 func validateInstance(instance Instance) error {

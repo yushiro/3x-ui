@@ -28,8 +28,8 @@ type ProcessLauncher interface {
 
 type commandLauncher struct{}
 
-// NewProcessLauncher returns the production launcher. Its only child arguments
-// are --config and the manager-owned configuration path.
+// NewProcessLauncher returns the production launcher. Its only child argument
+// is -c and the manager-owned configuration path.
 func NewProcessLauncher() ProcessLauncher { return commandLauncher{} }
 
 func (commandLauncher) Start(ctx context.Context, binary, configPath string) (ManagedProcess, error) {
@@ -41,17 +41,20 @@ func (commandLauncher) Start(ctx context.Context, binary, configPath string) (Ma
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	outputBuffer := newBoundedOutput(4096)
 	cmd := exec.CommandContext(context.Background(), binary, processArgs(binary, configPath)...)
+	cmd.Stdout = outputBuffer
+	cmd.Stderr = outputBuffer
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	p := &commandProcess{cmd: cmd, done: make(chan struct{}), running: true}
+	p := &commandProcess{cmd: cmd, done: make(chan struct{}), running: true, output: outputBuffer}
 	go p.wait()
 	return p, nil
 }
 
 func processArgs(_ string, configPath string) []string {
-	return []string{"--config", configPath}
+	return []string{"-c", configPath}
 }
 
 type commandProcess struct {
@@ -60,6 +63,42 @@ type commandProcess struct {
 	done    chan struct{}
 	running bool
 	err     error
+	output  *boundedOutput
+}
+
+type boundedOutput struct {
+	mu  sync.Mutex
+	max int
+	buf []byte
+}
+
+func newBoundedOutput(max int) *boundedOutput { return &boundedOutput{max: max} }
+
+func (b *boundedOutput) Write(p []byte) (int, error) {
+	n := len(p)
+	if b.max <= 0 || n == 0 {
+		return n, nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n > b.max {
+		p = p[n-b.max:]
+	}
+	if len(b.buf) > b.max {
+		b.buf = b.buf[:0]
+	}
+	b.buf = append(b.buf, p...)
+	if len(b.buf) > b.max {
+		keep := len(b.buf) - b.max
+		b.buf = append(b.buf[:0], b.buf[keep:]...)
+	}
+	return n, nil
+}
+
+func (b *boundedOutput) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return string(b.buf)
 }
 
 func (p *commandProcess) wait() {
@@ -106,6 +145,13 @@ func (p *commandProcess) Running() bool {
 	return p.running
 }
 
+func (p *commandProcess) LastOutput() string {
+	if p.output == nil {
+		return ""
+	}
+	return p.output.String()
+}
+
 type hostPrerequisites struct{ binaryPath string }
 
 // NewHostChecker uses the real local command runner with the current runtime
@@ -135,7 +181,10 @@ var managedConfigName = regexp.MustCompile(`^snell-[1-9][0-9]*\.conf$`)
 // isOwnedProcessArgs identifies only a sidecar started with this manager's
 // exact binary and one of its generated config paths.
 func isOwnedProcessArgs(binaryPath, configDir string, args []string) bool {
-	if len(args) != 3 || filepath.Clean(args[0]) != filepath.Clean(binaryPath) || args[1] != "--config" {
+	if len(args) != 3 || filepath.Clean(args[0]) != filepath.Clean(binaryPath) {
+		return false
+	}
+	if args[1] != "-c" && args[1] != "--config" {
 		return false
 	}
 	rel, err := filepath.Rel(filepath.Clean(configDir), filepath.Clean(args[2]))

@@ -14,6 +14,7 @@ type fakeManagedProcess struct {
 	running bool
 	stops   int
 	wait    chan error
+	output  string
 }
 
 func newFakeManagedProcess() *fakeManagedProcess {
@@ -40,6 +41,12 @@ func (p *fakeManagedProcess) markExited() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.running = false
+}
+
+func (p *fakeManagedProcess) LastOutput() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.output
 }
 
 type fakeLauncher struct {
@@ -140,6 +147,36 @@ func TestManagerQuotaStopAndCrashBackoff(t *testing.T) {
 	}
 	if len(launch.starts) != 1 || m.Status(5).Running {
 		t.Fatalf("quota-depleted inbound started: starts=%d status=%+v", len(launch.starts), m.Status(5))
+	}
+}
+
+func TestManagerRedactsProcessOutputFromLastError(t *testing.T) {
+	launch := &fakeLauncher{}
+	nft, _ := testNft(`{"nftables":[]}`)
+	m := NewManager(launch, fakeHost{}, nft, "/bin/snell-server", t.TempDir())
+	instance := testInstance(9)
+	process := newFakeManagedProcess()
+	process.output = "config check failed: psk = \"" + instance.PSK + "\""
+	m.withLifecycle(context.Background(), instance.ID, func(context.Context) error {
+		m.mu.Lock()
+		m.byID[instance.ID] = &entry{
+			process:     process,
+			instance:    instance,
+			backoff:     NewBackoff(),
+			startedAt:   m.now(),
+			generation:  1,
+			intentional: false,
+		}
+		m.mu.Unlock()
+		return nil
+	})
+	m.handleExit(context.Background(), instance.ID, process, errors.New("exit status 1"))
+	status := m.Status(instance.ID)
+	if strings.Contains(status.LastError, instance.PSK) {
+		t.Fatalf("secret leaked in LastError: %q", status.LastError)
+	}
+	if status.LastError == "" || !strings.Contains(status.LastError, "exit status 1") {
+		t.Fatalf("unexpected LastError: %q", status.LastError)
 	}
 }
 

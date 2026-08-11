@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/mhsanaei/3x-ui/v3/internal/logger"
 )
 
 const stableRunInterval = time.Minute
@@ -374,13 +378,39 @@ func (m *Manager) handleExit(_ context.Context, id int, process ManagedProcess, 
 	if err == nil {
 		err = errors.New("Snell sidecar exited")
 	}
-	cur.status.LastError = err.Error()
+	diagnostic := err.Error()
+	if processOutput := snellProcessOutput(process); processOutput != "" {
+		diagnostic = diagnostic + ": " + processOutput
+	}
+	cur.status.LastError = sanitizeSnellExitMessage(diagnostic, cur.instance.PSK)
 	delay := cur.backoff.Next()
 	cur.status.RestartAt = m.now().Add(delay)
 	cur.generation++
 	generation := cur.generation
 	instance := cur.instance
+	logger.Errorf("snell: runtime exited unexpectedly: inbound=%d error=%s", id, cur.status.LastError)
 	m.schedule(delay, func() { m.restartAfterBackoff(id, generation, instance) })
+}
+
+func snellProcessOutput(process ManagedProcess) string {
+	type processOutput interface{ LastOutput() string }
+	if process == nil {
+		return ""
+	}
+	out, ok := process.(processOutput)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(out.LastOutput())
+}
+
+func sanitizeSnellExitMessage(message, psk string) string {
+	if psk == "" {
+		return strings.TrimSpace(message)
+	}
+	secret := strings.TrimSpace(psk)
+	message = strings.ReplaceAll(message, secret, "[redacted]")
+	return strings.TrimSpace(strings.ReplaceAll(message, strconv.Quote(psk), "[redacted]"))
 }
 
 func (m *Manager) restartAfterBackoff(id int, generation uint64, instance Instance) {
