@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mhsanaei/3x-ui/v3/internal/database"
@@ -105,5 +106,75 @@ func TestGetXrayConfig_EnabledClientsStillEmitted(t *testing.T) {
 	}
 	if entry["id"] != "22222222-2222-2222-2222-222222222222" {
 		t.Errorf("client id not carried through: %#v", entry)
+	}
+}
+
+func TestGetXrayConfig_StandAloneSnellNotIncluded(t *testing.T) {
+	setupSettingTestDB(t)
+	db := database.GetDB()
+	snellTag := "snell-local"
+	psk := "secret-psk-12345678"
+
+	vlessInbound := &model.Inbound{
+		Tag:      "vless-normal",
+		Enable:   true,
+		Port:     52001,
+		Protocol: model.VLESS,
+		Settings: `{"clients":[],"decryption":"none"}`,
+	}
+	if err := db.Create(vlessInbound).Error; err != nil {
+		t.Fatalf("create vless inbound: %v", err)
+	}
+
+	snellInbound := &model.Inbound{
+		Tag:      snellTag,
+		Enable:   true,
+		Port:     52002,
+		Protocol: model.Snell,
+		Settings: `{"psk":"` + psk + `"}`,
+	}
+	if err := db.Create(snellInbound).Error; err != nil {
+		t.Fatalf("create snell inbound: %v", err)
+	}
+
+	svc := &XrayService{}
+	cfg, err := svc.GetXrayConfig()
+	if err != nil {
+		t.Fatalf("GetXrayConfig: %v", err)
+	}
+
+	foundVless := false
+	for _, inbound := range cfg.InboundConfigs {
+		if inbound.Tag == snellTag {
+			t.Fatalf("standalone snell inbound was unexpectedly injected: %q", inbound.Tag)
+		}
+		if inbound.Protocol == string(model.Snell) {
+			t.Fatalf("standalone snell protocol was unexpectedly emitted: %q", inbound.Protocol)
+		}
+		if strings.Contains(string(inbound.Settings), psk) {
+			t.Fatalf("snell PSK leaked into emitted inbound settings: %q", inbound.Settings)
+		}
+
+		if inbound.Tag != "vless-normal" {
+			continue
+		}
+		var settings map[string]any
+		if err := json.Unmarshal([]byte(inbound.Settings), &settings); err != nil {
+			t.Fatalf("unmarshal emitted vless settings: %v", err)
+		}
+		if inbound.Protocol != string(model.VLESS) {
+			t.Fatalf("expected emitted protocol %q for normal inbound, got %q", model.VLESS, inbound.Protocol)
+		}
+		if inbound.Tag != "vless-normal" {
+			t.Fatalf("expected normal vless tag preserved, got %q", inbound.Tag)
+		}
+		if settings == nil {
+			t.Fatal("normal inbound settings must be emitted")
+		}
+		foundVless = true
+	}
+
+	if !foundVless {
+		t.Fatal("normal local inbound was not emitted while building xray config")
 	}
 }
