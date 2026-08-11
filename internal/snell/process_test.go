@@ -1,6 +1,7 @@
 package snell
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -50,4 +51,76 @@ func TestBoundedProcessOutputSkipsOldestBytesOnOverflow(t *testing.T) {
 	if !strings.HasSuffix(out.String(), "cdefghijklmnopqr") {
 		t.Fatalf("unexpected bounded output: %q", out.String())
 	}
+}
+
+func TestBoundedProcessOutputRetainsSplitPSKForSanitization(t *testing.T) {
+	payload := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	const splitOffset = 32
+	output := buildSplitOutputPayload(t, payload, splitOffset)
+
+	old := newBoundedOutput(snellProcessOutputVisibleCap)
+	if _, err := old.Write([]byte(output)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	oldTail := old.String()
+	if strings.Contains(oldTail, payload[:splitOffset]) {
+		t.Fatalf("old capture unexpectedly kept full raw secret prefix: %q", oldTail)
+	}
+	if !strings.Contains(oldTail, payload[splitOffset:]) {
+		t.Fatalf("old capture dropped all of split secret: %q", oldTail)
+	}
+
+	capture := newBoundedOutput(snellProcessOutputCaptureCap)
+	if _, err := capture.Write([]byte(output)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !strings.Contains(capture.String(), payload) {
+		t.Fatalf("expanded capture dropped split raw secret: %q", capture.String())
+	}
+}
+
+func TestBoundedProcessOutputRetainsSplitQuotedPSKForSanitization(t *testing.T) {
+	secret := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/"
+	quoted := strconv.Quote(secret)
+	output := buildSplitOutputPayload(t, quoted, 16)
+	old := newBoundedOutput(snellProcessOutputVisibleCap)
+	if _, err := old.Write([]byte(output)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	oldTail := old.String()
+	if strings.Contains(oldTail, quoted[:16]) {
+		t.Fatalf("old capture unexpectedly kept full quoted prefix: %q", oldTail)
+	}
+	if !strings.Contains(oldTail, quoted[16:]) {
+		t.Fatalf("old capture dropped all of split quoted secret: %q", oldTail)
+	}
+
+	capture := newBoundedOutput(snellProcessOutputCaptureCap)
+	if _, err := capture.Write([]byte(output)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if !strings.Contains(capture.String(), quoted) {
+		t.Fatalf("expanded capture dropped split quoted secret: %q", capture.String())
+	}
+}
+
+func buildSplitOutputPayload(t *testing.T, payload string, splitOffset int) string {
+	t.Helper()
+	const (
+		boundary = 8000
+		prefix   = "psk = "
+	)
+	if splitOffset <= 0 || splitOffset >= len(payload) {
+		t.Fatalf("invalid split offset %d for payload len %d", splitOffset, len(payload))
+	}
+	line := prefix + payload
+	suffixLen := snellProcessOutputVisibleCap + splitOffset - len(payload)
+	if suffixLen < 0 {
+		t.Fatalf("invalid test data: line=%d split=%d", len(line), splitOffset)
+	}
+	prefixLen := boundary - len(prefix) - splitOffset
+	if prefixLen < 0 {
+		t.Fatalf("invalid boundary setup: %d", prefixLen)
+	}
+	return strings.Repeat("x", prefixLen) + line + strings.Repeat("x", suffixLen)
 }

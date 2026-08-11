@@ -14,6 +14,13 @@ import (
 	"sync"
 )
 
+const (
+	maxSnellRawPSKLength         = 128
+	maxSnellQuotedPSKExpansion   = (maxSnellRawPSKLength * 4) + 2
+	snellProcessOutputVisibleCap = 4096
+	snellProcessOutputCaptureCap = snellProcessOutputVisibleCap + maxSnellRawPSKLength + maxSnellQuotedPSKExpansion
+)
+
 // ManagedProcess is the lifecycle boundary for a single Snell sidecar.
 type ManagedProcess interface {
 	Stop(context.Context) error
@@ -41,7 +48,7 @@ func (commandLauncher) Start(ctx context.Context, binary, configPath string) (Ma
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	outputBuffer := newBoundedOutput(4096)
+	outputBuffer := newBoundedOutput(snellProcessOutputCaptureCap)
 	cmd := exec.CommandContext(context.Background(), binary, processArgs(binary, configPath)...)
 	cmd.Stdout = outputBuffer
 	cmd.Stderr = outputBuffer

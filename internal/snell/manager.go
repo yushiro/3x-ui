@@ -16,6 +16,11 @@ import (
 
 const stableRunInterval = time.Minute
 
+const (
+	snellExitDiagnosticCap       = snellProcessOutputVisibleCap
+	snellExitDiagnosticHeadChars = 192
+)
+
 // Backoff bounds restart attempts after an unexpected sidecar exit.
 type Backoff interface {
 	Next() time.Duration
@@ -378,11 +383,7 @@ func (m *Manager) handleExit(_ context.Context, id int, process ManagedProcess, 
 	if err == nil {
 		err = errors.New("Snell sidecar exited")
 	}
-	diagnostic := err.Error()
-	if processOutput := snellProcessOutput(process); processOutput != "" {
-		diagnostic = diagnostic + ": " + processOutput
-	}
-	cur.status.LastError = sanitizeSnellExitMessage(diagnostic, cur.instance.PSK)
+	cur.status.LastError = snellExitDiagnostic(err, snellProcessOutput(process), cur.instance.PSK)
 	delay := cur.backoff.Next()
 	cur.status.RestartAt = m.now().Add(delay)
 	cur.generation++
@@ -402,6 +403,33 @@ func snellProcessOutput(process ManagedProcess) string {
 		return ""
 	}
 	return strings.TrimSpace(out.LastOutput())
+}
+
+func snellExitDiagnostic(err error, processOutput, psk string) string {
+	if err == nil {
+		err = errors.New("Snell sidecar exited")
+	}
+	diagnostic := err.Error()
+	if processOutput != "" {
+		diagnostic = diagnostic + ": " + processOutput
+	}
+	return sanitizeAndTrimSnellExitDiagnostic(diagnostic, psk)
+}
+
+func sanitizeAndTrimSnellExitDiagnostic(message, psk string) string {
+	message = sanitizeSnellExitMessage(message, psk)
+	if len(message) <= snellExitDiagnosticCap {
+		return strings.TrimSpace(message)
+	}
+	head := snellExitDiagnosticHeadChars
+	if head > len(message) {
+		head = len(message)
+	}
+	tailBudget := snellExitDiagnosticCap - head - 4
+	if tailBudget <= 0 {
+		return strings.TrimSpace(message[:snellExitDiagnosticCap])
+	}
+	return strings.TrimSpace(message[:head] + "... " + message[len(message)-tailBudget:])
 }
 
 func sanitizeSnellExitMessage(message, psk string) string {

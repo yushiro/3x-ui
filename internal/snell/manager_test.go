@@ -3,6 +3,7 @@ package snell
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -178,6 +179,93 @@ func TestManagerRedactsProcessOutputFromLastError(t *testing.T) {
 	if status.LastError == "" || !strings.Contains(status.LastError, "exit status 1") {
 		t.Fatalf("unexpected LastError: %q", status.LastError)
 	}
+}
+
+func TestManagerRedactsBoundarySplitRawAndQuotedPSKFromExitDiagnostics(t *testing.T) {
+	tests := []struct {
+		name        string
+		psk         string
+		payload     string
+		splitOffset int
+	}{
+		{
+			name:        "raw",
+			psk:         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+			payload:     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+			splitOffset: 32,
+		},
+		{
+			name:        "quoted",
+			psk:         "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/",
+			payload:     strconv.Quote("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ+/"),
+			splitOffset: 16,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			output := buildBoundarySplitOutputForDiagnosticTest(t, tc.payload, tc.splitOffset)
+			old := newBoundedOutput(snellProcessOutputVisibleCap)
+			if _, err := old.Write([]byte(output)); err != nil {
+				t.Fatalf("write old capture: %v", err)
+			}
+			oldTail := old.String()
+			if strings.Contains(oldTail, tc.payload[:tc.splitOffset]) {
+				t.Fatalf("old capture unexpectedly retained full payload prefix: %q", oldTail)
+			}
+			if !strings.Contains(oldTail, tc.payload[tc.splitOffset:]) {
+				t.Fatalf("old capture dropped all of split payload: %q", oldTail)
+			}
+
+			capture := newBoundedOutput(snellProcessOutputCaptureCap)
+			if _, err := capture.Write([]byte(output)); err != nil {
+				t.Fatalf("write new capture: %v", err)
+			}
+			if !strings.Contains(capture.String(), tc.payload) {
+				t.Fatalf("expanded capture did not retain full payload: %q", capture.String())
+			}
+			last := snellExitDiagnostic(errors.New("exit status 1"), capture.String(), tc.psk)
+			if strings.Contains(last, tc.psk) {
+				t.Fatalf("raw psk leaked in LastError: %q", last)
+			}
+			if strings.Contains(last, tc.payload[tc.splitOffset:]) {
+				t.Fatalf("split payload fragment leaked in LastError: %q", last)
+			}
+			if tc.name == "quoted" {
+				quoted := strconv.Quote(tc.psk)
+				if strings.Contains(last, quoted) {
+					t.Fatalf("quoted psk leaked in LastError: %q", last)
+				}
+				if strings.Contains(last, quoted[tc.splitOffset:]) {
+					t.Fatalf("quoted fragment leaked in LastError: %q", last)
+				}
+			}
+			if !strings.Contains(last, "exit status 1") {
+				t.Fatalf("exit error prefix missing: %q", last)
+			}
+		})
+	}
+}
+
+func buildBoundarySplitOutputForDiagnosticTest(t *testing.T, payload string, splitOffset int) string {
+	t.Helper()
+	const (
+		boundary           = 8000
+		visibleBufferLimit = snellProcessOutputVisibleCap
+		payloadPrefix      = "psk = "
+	)
+	if splitOffset <= 0 || splitOffset >= len(payload) {
+		t.Fatalf("invalid split offset %d for payload len %d", splitOffset, len(payload))
+	}
+	line := payloadPrefix + payload
+	suffixLen := visibleBufferLimit + splitOffset - len(payload)
+	if suffixLen < 0 {
+		t.Fatalf("invalid test payload: payload=%d split=%d", len(payload), splitOffset)
+	}
+	prefixLen := boundary - len(payloadPrefix) - splitOffset
+	if prefixLen < 0 {
+		t.Fatalf("invalid boundary setup: %d", prefixLen)
+	}
+	return strings.Repeat("x", prefixLen) + line + strings.Repeat("x", suffixLen)
 }
 
 func TestManagerReconcileRepairsLowerCountersByStoppingBeforeRestart(t *testing.T) {
