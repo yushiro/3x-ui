@@ -99,6 +99,32 @@ arch() {
     esac
 }
 
+# XUI_RELEASE_SOURCE_HELPERS_BEGIN
+XUI_DEFAULT_REPO="yushiro/3x-ui"
+
+xui_resolve_repo() {
+    local repo="${XUI_REPO:-${XUI_DEFAULT_REPO}}"
+    [[ "$repo" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?/[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]] || {
+        echo "Invalid XUI_REPO: ${repo}" >&2
+        return 2
+    }
+    printf '%s\n' "$repo"
+}
+
+xui_validate_stable_tag() { [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+xui_validate_release_ref() { [[ "$1" == "dev-latest" ]] || xui_validate_stable_tag "$1"; }
+xui_release_api_url() { printf 'https://api.github.com/repos/%s/releases/latest\n' "$1"; }
+xui_release_asset_url() { printf 'https://github.com/%s/releases/download/%s/%s\n' "$1" "$2" "$3"; }
+xui_raw_url() {
+    case "$3" in
+        install.sh|update.sh|x-ui.sh|x-ui.rc|x-ui.service.debian|x-ui.service.arch|x-ui.service.rhel) ;;
+        *) return 2 ;;
+    esac
+    xui_validate_release_ref "$2" || return 2
+    printf 'https://raw.githubusercontent.com/%s/%s/%s\n' "$1" "$2" "$3"
+}
+# XUI_RELEASE_SOURCE_HELPERS_END
+
 # SNELL_V5_HELPERS_BEGIN
 SNELL_AMD64_URL="https://dl.nssurge.com/snell/snell-server-v5.0.1-linux-amd64.zip"
 SNELL_AMD64_SHA256="9bea1c2b9e35b73b31634856c04d18c393072b9e5dcde6a32781d8b8f908c539"
@@ -1042,9 +1068,14 @@ _install_xui_service_unit() {
 }
 
 update_x-ui() {
+    local xui_repo archive_url raw_url tag_version
+
     cd ${xui_folder%/x-ui}/
 
     load_xui_env
+
+    xui_repo="$(xui_resolve_repo)" || _fail "ERROR: Invalid XUI_REPO"
+    export XUI_REPO="$xui_repo"
 
     if [ -f "${xui_folder}/x-ui" ]; then
         current_xui_version=$(${xui_folder}/x-ui -v)
@@ -1059,15 +1090,19 @@ update_x-ui() {
     # rolling dev-latest pre-release). Empty keeps the default latest-stable flow.
     if [[ -n "${XUI_UPDATE_TAG}" ]]; then
         tag_version="${XUI_UPDATE_TAG}"
+        if ! xui_validate_release_ref "$tag_version"; then
+            _fail "ERROR: Invalid XUI_UPDATE_TAG"
+        fi
         echo -e "${green}Using update tag: ${tag_version}${plain}"
     else
-        tag_version=$(${curl_bin} -Ls "https://api.github.com/repos/MHSanaei/3x-ui/releases/latest" 2> /dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-        if [[ ! -n "$tag_version" ]]; then
+        tag_version=$(${curl_bin} -Ls "$(xui_release_api_url "$xui_repo")" 2> /dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+        if ! xui_validate_stable_tag "$tag_version"; then
             _fail "ERROR: Failed to fetch x-ui version, it may be due to GitHub API restrictions, please try it later"
         fi
     fi
     echo -e "Got x-ui latest version: ${tag_version}, beginning the installation..."
-    ${curl_bin} -fLRo ${xui_folder}-linux-$(arch).tar.gz https://github.com/MHSanaei/3x-ui/releases/download/${tag_version}/x-ui-linux-$(arch).tar.gz 2> /dev/null
+    archive_url="$(xui_release_asset_url "$xui_repo" "$tag_version" "x-ui-linux-$(arch).tar.gz")" || _fail "ERROR: Invalid release asset URL"
+    ${curl_bin} -fLRo ${xui_folder}-linux-$(arch).tar.gz "$archive_url" 2> /dev/null
     if [[ $? -ne 0 ]]; then
         _fail "ERROR: Failed to download x-ui, please be sure that your server can access GitHub"
     fi
@@ -1166,7 +1201,8 @@ update_x-ui() {
     echo -e "${green}Downloading and installing x-ui.sh script...${plain}"
     local xui_script_temp="/usr/bin/x-ui-temp.$$"
     rm -f "${xui_script_temp}"
-    ${curl_bin} -fLRo "${xui_script_temp}" https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh > /dev/null 2>&1
+    raw_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.sh)" || _fail "ERROR: Invalid x-ui.sh release source"
+    ${curl_bin} -fLRo "${xui_script_temp}" "$raw_url" > /dev/null 2>&1
     if [[ $? -ne 0 ]]; then
         rm -f "${xui_script_temp}"
         _fail "ERROR: Failed to download x-ui.sh script, please be sure that your server can access GitHub"
@@ -1197,7 +1233,8 @@ update_x-ui() {
         echo -e "${green}Downloading and installing startup unit x-ui.rc...${plain}"
         xui_rc_temp="/etc/init.d/x-ui.tmp.$$"
         rm -f "${xui_rc_temp}"
-        ${curl_bin} -fLRo "${xui_rc_temp}" https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.rc > /dev/null 2>&1
+        raw_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.rc)" || _fail "ERROR: Invalid x-ui.rc release source"
+        ${curl_bin} -fLRo "${xui_rc_temp}" "$raw_url" > /dev/null 2>&1
         if [[ $? -ne 0 ]]; then
             rm -f "${xui_rc_temp}"
             _fail "ERROR: Failed to download startup unit x-ui.rc, please be sure that your server can access GitHub"
@@ -1256,13 +1293,13 @@ update_x-ui() {
                 echo -e "${yellow}Service files not found in tar.gz, downloading from GitHub...${plain}"
                 case "${release}" in
                     ubuntu | debian | armbian)
-                        service_unit_url="https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.debian"
+                        service_unit_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.service.debian)" || _fail "ERROR: Invalid Debian service release source"
                         ;;
                     arch | manjaro | parch)
-                        service_unit_url="https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.arch"
+                        service_unit_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.service.arch)" || _fail "ERROR: Invalid Arch service release source"
                         ;;
                     *)
-                        service_unit_url="https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.service.rhel"
+                        service_unit_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.service.rhel)" || _fail "ERROR: Invalid RHEL service release source"
                         ;;
                 esac
 
@@ -1309,5 +1346,7 @@ update_x-ui() {
 }
 
 echo -e "${green}Running...${plain}"
+xui_repo="$(xui_resolve_repo)" || _fail "ERROR: Invalid XUI_REPO"
+export XUI_REPO="$xui_repo"
 install_base
 update_x-ui $1

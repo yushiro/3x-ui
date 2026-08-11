@@ -173,11 +173,125 @@ EOF
     echo "SNELL_HELPER_PASS: ${script}"
 }
 
+run_release_source_helper_tests() {
+    local script="$1"
+    local test_root helper_file repo tag invalid
+    test_root="$(mktemp -d)"
+    helper_file="${test_root}/release-source-helpers.sh"
+    trap 'rm -rf "${test_root}"' RETURN
+
+    sed -n '/^# XUI_RELEASE_SOURCE_HELPERS_BEGIN$/,/^# XUI_RELEASE_SOURCE_HELPERS_END$/p' "$script" > "$helper_file"
+    [[ -s "$helper_file" ]] || snell_test_fail "${script}: missing release source helper block"
+    # shellcheck disable=SC1090
+    source "$helper_file"
+
+    unset XUI_REPO
+    [[ "$(xui_resolve_repo)" == "yushiro/3x-ui" ]] \
+        || snell_test_fail "${script}: default repository is incorrect"
+
+    XUI_REPO="example-owner/example-repo"
+    [[ "$(xui_resolve_repo)" == "example-owner/example-repo" ]] \
+        || snell_test_fail "${script}: valid XUI_REPO was not accepted"
+
+    for invalid in 'owner' '/repo' 'owner/' 'owner/repo/extra' 'https://github.com/a/b' 'a/$b' 'a/../b'; do
+        XUI_REPO="$invalid"
+        if xui_resolve_repo > /dev/null 2>&1; then
+            snell_test_fail "${script}: accepted invalid XUI_REPO: ${invalid}"
+        fi
+    done
+
+    xui_validate_stable_tag v3.6.1 \
+        || snell_test_fail "${script}: rejected stable tag"
+    if xui_validate_stable_tag dev-latest || xui_validate_stable_tag v3.6.1-snell; then
+        snell_test_fail "${script}: accepted invalid stable tag"
+    fi
+    xui_validate_release_ref dev-latest \
+        || snell_test_fail "${script}: rejected dev-latest"
+
+    repo="yushiro/3x-ui"
+    tag="v3.6.1"
+    [[ "$(xui_release_api_url "$repo")" == "https://api.github.com/repos/yushiro/3x-ui/releases/latest" ]] \
+        || snell_test_fail "${script}: incorrect release API URL"
+    [[ "$(xui_release_asset_url "$repo" "$tag" x-ui-linux-amd64.tar.gz)" == "https://github.com/yushiro/3x-ui/releases/download/v3.6.1/x-ui-linux-amd64.tar.gz" ]] \
+        || snell_test_fail "${script}: incorrect release asset URL"
+    [[ "$(xui_raw_url "$repo" "$tag" x-ui.sh)" == "https://raw.githubusercontent.com/yushiro/3x-ui/v3.6.1/x-ui.sh" ]] \
+        || snell_test_fail "${script}: incorrect raw URL"
+    if xui_raw_url "$repo" "$tag" unsupported-file > /dev/null 2>&1; then
+        snell_test_fail "${script}: accepted unsupported raw resource"
+    fi
+
+    echo "RELEASE_SOURCE_HELPER_PASS: ${script}"
+}
+
+run_invalid_repo_no_download_test() {
+    local script="$1"
+    local test_root fake_bin curl_count
+    test_root="$(mktemp -d)"
+    fake_bin="${test_root}/bin"
+    curl_count="${test_root}/curl-count"
+    mkdir -p "${fake_bin}" "${test_root}/main" "${test_root}/service"
+    trap 'rm -rf "${test_root}"' RETURN
+
+    cat > "${fake_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+printf '1\n' >> "${FAKE_CURL_COUNT:?}"
+exit 99
+EOF
+    cat > "${fake_bin}/apt-get" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "${fake_bin}/curl" "${fake_bin}/apt-get"
+
+    if PATH="${fake_bin}:$PATH" \
+        FAKE_CURL_COUNT="${curl_count}" \
+        XUI_REPO='owner/repo/extra' \
+        XUI_MAIN_FOLDER="${test_root}/main/x-ui" \
+        XUI_SERVICE="${test_root}/service" \
+        bash "$script" > "${test_root}/output" 2>&1; then
+        snell_test_fail "${script}: invalid XUI_REPO was accepted by production path"
+    fi
+    [[ ! -e "${curl_count}" ]] \
+        || snell_test_fail "${script}: invalid XUI_REPO invoked curl"
+}
+
+assert_release_source_call_sites() {
+    local script="$1"
+    local raw_call_count
+
+    rg -Fq 'xui_release_api_url "$xui_repo"' "$script" \
+        || snell_test_fail "${script}: latest API call bypasses release helper"
+    rg -Fq 'xui_release_asset_url "$xui_repo" "$tag_version"' "$script" \
+        || snell_test_fail "${script}: release asset call bypasses release helper"
+    raw_call_count="$(rg -F -c 'xui_raw_url "$xui_repo" "$tag_version"' "$script")"
+    [[ "$raw_call_count" -eq 5 ]] \
+        || snell_test_fail "${script}: raw resources do not consistently use tag_version"
+
+    for upstream_url in \
+        'MHSanaei/3x-ui/releases' \
+        'api.github.com/repos/MHSanaei/3x-ui' \
+        'raw.githubusercontent.com/MHSanaei/3x-ui'; do
+        if rg -Fq "$upstream_url" "$script"; then
+            snell_test_fail "${script}: upstream URL remains: ${upstream_url}"
+        fi
+    done
+}
+
 verify_snell_readme
 
 if [[ "${XUI_SMOKE_VERSION}" == "--snell-helper-tests" ]]; then
     run_snell_helper_tests "${REPO_ROOT}/install.sh"
     run_snell_helper_tests "${REPO_ROOT}/update.sh"
+    exit 0
+fi
+
+if [[ "${XUI_SMOKE_VERSION}" == "--release-source-tests" ]]; then
+    run_release_source_helper_tests "${REPO_ROOT}/install.sh"
+    run_release_source_helper_tests "${REPO_ROOT}/update.sh"
+    run_invalid_repo_no_download_test "${REPO_ROOT}/install.sh"
+    run_invalid_repo_no_download_test "${REPO_ROOT}/update.sh"
+    assert_release_source_call_sites "${REPO_ROOT}/install.sh"
+    assert_release_source_call_sites "${REPO_ROOT}/update.sh"
     exit 0
 fi
 
