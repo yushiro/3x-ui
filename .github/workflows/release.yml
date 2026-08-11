@@ -119,10 +119,12 @@ jobs:
           export CC=$(realpath "$(find "$TOOLCHAIN_DIR/bin" -name '*-gcc.br_real' -type f -executable | head -n1)")
           [ -z "$CC" ] && { echo "No gcc.br_real found in $TOOLCHAIN_DIR/bin" >&2; exit 1; }
           cd -
-          # Stamp the commit into per-commit (dev channel) builds only; tagged
-          # stable releases stay unstamped so config.IsDevBuild() returns false.
+          # Exact stable tags get their tag version; per-commit dev builds get
+          # commit metadata only, so config.IsDevBuild remains commit-based.
           LDFLAGS="-w -s -linkmode external -extldflags '-static'"
-          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+          if [[ "${{ needs.classify-release-tag.outputs.stable_tag }}" == "true" ]]; then
+            LDFLAGS="$LDFLAGS -X github.com/mhsanaei/3x-ui/v3/internal/config.buildVersion=${GITHUB_REF_NAME#v}"
+          elif [[ "$GITHUB_REF" != refs/tags/* ]]; then
             LDFLAGS="$LDFLAGS -X github.com/mhsanaei/3x-ui/v3/internal/config.buildCommit=${GITHUB_SHA::8} -X github.com/mhsanaei/3x-ui/v3/internal/config.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           fi
           go build -ldflags "$LDFLAGS" -o xui-release -v main.go
@@ -282,9 +284,12 @@ jobs:
           go version
           gcc --version
 
-          # Stamp the commit into per-commit (dev channel) builds only.
+          # Exact stable tags get their tag version; per-commit dev builds get
+          # commit metadata only, so config.IsDevBuild remains commit-based.
           LDFLAGS="-w -s"
-          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+          if [[ "${{ needs.classify-release-tag.outputs.stable_tag }}" == "true" ]]; then
+            LDFLAGS="$LDFLAGS -X github.com/mhsanaei/3x-ui/v3/internal/config.buildVersion=${GITHUB_REF_NAME#v}"
+          elif [[ "$GITHUB_REF" != refs/tags/* ]]; then
             LDFLAGS="$LDFLAGS -X github.com/mhsanaei/3x-ui/v3/internal/config.buildCommit=${GITHUB_SHA:0:8} -X github.com/mhsanaei/3x-ui/v3/internal/config.buildDate=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           fi
           go build -ldflags "$LDFLAGS" -o xui-release.exe -v main.go

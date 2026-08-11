@@ -617,6 +617,23 @@ dev_run = dev_step['run'].to_s
 fail!('dev edit no longer preserves prerelease/latest=false') unless dev_run.include?('gh release edit dev-latest --prerelease --latest=false')
 fail!('dev create no longer preserves prerelease/latest=false') unless dev_run.include?('gh release create dev-latest --prerelease --latest=false')
 
+[
+  ['Linux', jobs['build'], 'Build 3X-UI'],
+  ['Windows', jobs['build-windows'], 'Build 3X-UI for Windows (CGO)']
+].each do |platform, job, step_name|
+  fail!("missing #{platform} build job") unless job.is_a?(Hash)
+  step = (job['steps'] || []).find { |candidate| candidate['name'] == step_name }
+  fail!("missing #{platform} build step") unless step
+  stable_run, dev_run = step['run'].to_s.split('elif [[ "$GITHUB_REF" != refs/tags/* ]]; then', 2)
+  fail!("#{platform} stable build does not use the exact-tag classifier") unless stable_run.include?('needs.classify-release-tag.outputs.stable_tag')
+  fail!("#{platform} stable build does not stamp the exact tag version") unless stable_run.include?('internal/config.buildVersion=${GITHUB_REF_NAME#v}')
+  fail!("#{platform} stable build stamps a dev commit") if stable_run.include?('internal/config.buildCommit=')
+  fail!("#{platform} dev build branch is missing") unless dev_run
+  fail!("#{platform} dev build no longer stamps the commit") unless dev_run.include?('internal/config.buildCommit=')
+  fail!("#{platform} dev build no longer stamps the build date") unless dev_run.include?('internal/config.buildDate=')
+  fail!("#{platform} dev build stamps a stable version") if dev_run.include?('internal/config.buildVersion=')
+end
+
 bootstrap = (cloud_init['write_files'] || []).find { |entry| entry['path'] == '/opt/xui-bootstrap.sh' }
 fail!('missing cloud-init bootstrap') unless bootstrap
 fail!('cloud-init default installer is not the fork') unless bootstrap['content'].include?('https://raw.githubusercontent.com/yushiro/3x-ui/main/install.sh')

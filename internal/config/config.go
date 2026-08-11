@@ -20,13 +20,13 @@ var version string
 //go:embed name
 var name string
 
-// buildCommit and buildDate are injected at build time via `-ldflags -X` for
-// CI per-commit (dev channel) builds; see .github/workflows/release.yml. They
-// stay empty for a plain `go build` and for stable tagged releases, which is how
-// IsDevBuild tells a rolling dev build apart from a stable/local one.
+// buildVersion is injected via `-ldflags -X` for exact stable release tags.
+// buildCommit and buildDate are injected for CI per-commit (dev channel) builds;
+// see .github/workflows/release.yml. Only buildCommit identifies a dev build.
 var (
-	buildCommit string
-	buildDate   string
+	buildVersion string
+	buildCommit  string
+	buildDate    string
 )
 
 // LogLevel represents the logging level for the application.
@@ -41,11 +41,15 @@ const (
 	Error   LogLevel = "error"
 )
 
-// GetBaseVersion returns the raw embedded release version of the 3x-ui panel
-// (e.g. "3.4.0"). This is the panel's own version, not the Xray version. For the
-// version a panel advertises/displays (which adds a "dev+<sha>" label on dev
-// builds), use GetPanelVersion.
+// GetBaseVersion returns the link-time stable release version when present,
+// otherwise the embedded release version of the 3x-ui panel (e.g. "3.4.0").
+// This is the panel's own version, not the Xray version. For the version a panel
+// advertises/displays (which adds a "dev+<sha>" label on dev builds), use
+// GetPanelVersion.
 func GetBaseVersion() string {
+	if override := strings.TrimSpace(buildVersion); override != "" {
+		return override
+	}
 	return strings.TrimSpace(version)
 }
 

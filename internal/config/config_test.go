@@ -5,6 +5,41 @@ import (
 	"testing"
 )
 
+func TestBuildVersionOverride(t *testing.T) {
+	originalVersion := buildVersion
+	originalCommit := buildCommit
+	t.Cleanup(func() {
+		buildVersion = originalVersion
+		buildCommit = originalCommit
+	})
+
+	buildVersion = ""
+	buildCommit = ""
+	fallback := GetBaseVersion()
+	if fallback == "" {
+		t.Fatal("embedded version fallback is empty")
+	}
+
+	buildVersion = " \t3.6.999\n"
+	if got := GetBaseVersion(); got != "3.6.999" {
+		t.Fatalf("stable build override: GetBaseVersion = %q, want %q", got, "3.6.999")
+	}
+	if IsDevBuild() {
+		t.Fatal("stable build version override must not mark the build as dev")
+	}
+	if got := GetPanelVersion(); got != "3.6.999" {
+		t.Fatalf("stable build override: GetPanelVersion = %q, want %q", got, "3.6.999")
+	}
+
+	buildCommit = "1d1128cf945c4615efa05cf41ba7fa766e2ee428"
+	if !IsDevBuild() {
+		t.Fatal("build commit must still mark the build as dev")
+	}
+	if got := GetPanelVersion(); got != "dev+1d1128cf" {
+		t.Fatalf("dev build: GetPanelVersion = %q, want %q", got, "dev+1d1128cf")
+	}
+}
+
 func TestGetPanelVersion(t *testing.T) {
 	orig := buildCommit
 	t.Cleanup(func() { buildCommit = orig })
