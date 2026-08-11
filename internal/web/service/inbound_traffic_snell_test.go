@@ -52,10 +52,10 @@ type resetSnellHost struct{}
 func (resetSnellHost) Check(context.Context) error { return nil }
 
 type resetSnellNft struct {
-	mu       sync.Mutex
-	calls    [][]string
-	resetErr error
-	output   []byte
+	mu            sync.Mutex
+	calls         [][]string
+	resetErr      error
+	output        []byte
 	clearOnDelete bool
 }
 

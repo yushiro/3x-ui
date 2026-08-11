@@ -34,23 +34,28 @@ func (f *fakeSnellRuntime) ReconcileSnell(context.Context, []snell.Instance) err
 	f.reconcile++
 	return nil
 }
+
 func (*fakeSnellRuntime) BeginSnellLifecycle(ctx context.Context, _ int) (context.Context, func(), error) {
 	return ctx, func() {}, nil
 }
+
 func (f *fakeSnellRuntime) ReadSnellCounters(_ context.Context, id int) (snell.Counters, error) {
 	if err := f.readErr[id]; err != nil {
 		return snell.Counters{}, err
 	}
 	return f.counters[id], nil
 }
+
 func (f *fakeSnellRuntime) SyncSnellCounters(_ context.Context, id int, _ snell.Counters) error {
 	f.synced = append(f.synced, id)
 	return f.syncErr
 }
+
 func (f *fakeSnellRuntime) EnforceSnellQuota(_ context.Context, id int) error {
 	f.enforced = append(f.enforced, id)
 	return nil
 }
+
 func (f *fakeSnellRuntime) ResetSnellTraffic(_ context.Context, id int, monthly bool) error {
 	f.resetCalls = append(f.resetCalls, struct {
 		id      int

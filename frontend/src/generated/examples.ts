@@ -441,6 +441,7 @@ export const EXAMPLES: Record<string, unknown> = {
     "port": 443,
     "protocol": "vless",
     "remark": "VLESS-443",
+    "runtimeStatus": null,
     "settings": null,
     "shareAddr": "",
     "shareAddrStrategy": "node",
@@ -487,6 +488,10 @@ export const EXAMPLES: Record<string, unknown> = {
     "wgDns": "",
     "wgMtu": 0,
     "wgPublicKey": ""
+  },
+  "InboundViewStatus": {
+    "errorCategory": "",
+    "running": false
   },
   "Msg": {
     "msg": "",

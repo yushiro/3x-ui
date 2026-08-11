@@ -12,8 +12,8 @@ import (
 )
 
 const (
-	nftFamily = "inet"
-	nftTable  = "xui_snell"
+	nftFamily      = "inet"
+	nftTable       = "xui_snell"
 	nftInputChain  = "snell_input"
 	nftOutputChain = "snell_output"
 )

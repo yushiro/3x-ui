@@ -1818,7 +1818,8 @@
               "mixed",
               "tunnel",
               "tun",
-              "mtproto"
+              "mtproto",
+              "snell"
             ],
             "example": "vless",
             "type": "string"
@@ -1827,6 +1828,14 @@
             "description": "Human-readable remark",
             "example": "VLESS-443",
             "type": "string"
+          },
+          "runtimeStatus": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InboundViewStatus"
+              }
+            ],
+            "nullable": true
           },
           "settings": {},
           "shareAddr": {
@@ -2040,6 +2049,21 @@
           "ssMethod",
           "tag",
           "tlsFlowCapable"
+        ],
+        "type": "object"
+      },
+      "InboundViewStatus": {
+        "description": "InboundViewStatus is read-time sidecar state, never a database column.",
+        "properties": {
+          "errorCategory": {
+            "type": "string"
+          },
+          "running": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "running"
         ],
         "type": "object"
       },
@@ -3158,6 +3182,7 @@
                       "port": 443,
                       "protocol": "vless",
                       "remark": "VLESS-443",
+                      "runtimeStatus": null,
                       "settings": null,
                       "shareAddr": "",
                       "shareAddrStrategy": "node",

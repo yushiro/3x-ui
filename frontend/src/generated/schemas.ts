@@ -1792,7 +1792,8 @@ export const SCHEMAS: Record<string, unknown> = {
           "mixed",
           "tunnel",
           "tun",
-          "mtproto"
+          "mtproto",
+          "snell"
         ],
         "example": "vless",
         "type": "string"
@@ -1801,6 +1802,14 @@ export const SCHEMAS: Record<string, unknown> = {
         "description": "Human-readable remark",
         "example": "VLESS-443",
         "type": "string"
+      },
+      "runtimeStatus": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/InboundViewStatus"
+          }
+        ],
+        "nullable": true
       },
       "settings": {},
       "shareAddr": {
@@ -2014,6 +2023,21 @@ export const SCHEMAS: Record<string, unknown> = {
       "ssMethod",
       "tag",
       "tlsFlowCapable"
+    ],
+    "type": "object"
+  },
+  "InboundViewStatus": {
+    "description": "InboundViewStatus is read-time sidecar state, never a database column.",
+    "properties": {
+      "errorCategory": {
+        "type": "string"
+      },
+      "running": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "running"
     ],
     "type": "object"
   },
