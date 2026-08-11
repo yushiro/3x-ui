@@ -8,15 +8,18 @@ import (
 )
 
 func TestConfigRenderAndWriteArePrivate(t *testing.T) {
-	data, err := RenderConfig(Instance{ID: 7, Listen: "0.0.0.0", Port: 443, PSK: "0123456789abcdef"})
+	const psk = "webui-PSK_2026-raw"
+	data, err := RenderConfig(Instance{ID: 7, Listen: "0.0.0.0", Port: 443, PSK: psk})
 	if err != nil {
 		t.Fatalf("RenderConfig: %v", err)
 	}
-	text := string(data)
-	for _, want := range []string{"[snell-server]", `listen = 0.0.0.0:443`, `psk = "0123456789abcdef"`, "ipv6 = false"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("config missing %q: %s", want, text)
-		}
+	const want = `[snell-server]
+listen = 0.0.0.0:443
+psk = webui-PSK_2026-raw
+ipv6 = false
+`
+	if got := string(data); got != want {
+		t.Fatalf("config = %q, want %q", got, want)
 	}
 
 	path := filepath.Join(t.TempDir(), "snell.conf")

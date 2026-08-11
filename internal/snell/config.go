@@ -17,7 +17,7 @@ func RenderConfig(instance Instance) ([]byte, error) {
 	}
 	listen := net.JoinHostPort(instance.Listen, strconv.Itoa(instance.Port))
 	return []byte(fmt.Sprintf("[snell-server]\nlisten = %s\npsk = %s\nipv6 = false\n",
-		listen, strconv.Quote(instance.PSK))), nil
+		listen, instance.PSK)), nil
 }
 
 func validateInstance(instance Instance) error {
