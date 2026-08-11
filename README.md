@@ -69,19 +69,27 @@ Built as an enhanced fork of the original X-UI project, 3X-UI adds broader proto
 ## Quick Start
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)
+# Default: install the latest stable Release from yushiro/3x-ui.
+bash <(curl -Ls https://raw.githubusercontent.com/yushiro/3x-ui/main/install.sh)
+
+# Override with another compatible fork.
+XUI_REPO=owner/repository bash <(curl -Ls https://raw.githubusercontent.com/owner/repository/main/install.sh)
 ```
+
+The first unpinned install succeeds only after the selected fork has published a
+stable `vX.Y.Z` Release containing `x-ui-linux-<arch>.tar.gz` for the current
+architecture.
 
 To install a specific version, append its tag (e.g. `v3.4.0`):
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) v3.4.0
+bash <(curl -Ls https://raw.githubusercontent.com/yushiro/3x-ui/main/install.sh) v3.4.0
 ```
 
 To install the rolling **dev** build (latest per-commit pre-release from `main`, not a stable release), pass `dev-latest`:
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) dev-latest
+bash <(curl -Ls https://raw.githubusercontent.com/yushiro/3x-ui/main/install.sh) dev-latest
 ```
 
 During installation a random username, password, and access path are generated. After installation, run `x-ui` to open the management menu, where you can start/stop the service, view or reset your login credentials, manage SSL certificates, and more.

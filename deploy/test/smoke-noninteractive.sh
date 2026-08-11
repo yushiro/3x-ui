@@ -416,6 +416,65 @@ EOF
     echo "XUI_MENU_RELEASE_SOURCE_PASS: ${script}"
 }
 
+run_release_workflow_semantic_tests() {
+    local workflow="${REPO_ROOT}/.github/workflows/release.yml"
+    local cloud_init="${REPO_ROOT}/deploy/cloud-init/cloud-init.yaml"
+
+    if ! ruby -ryaml - "$workflow" "$cloud_init" <<'RUBY'
+workflow = YAML.load_file(ARGV.fetch(0))
+cloud_init = YAML.load_file(ARGV.fetch(1))
+
+def fail!(message)
+  abort "workflow semantic failure: #{message}"
+end
+
+triggers = workflow['on'] || workflow[true]
+fail!('missing workflow triggers') unless triggers.is_a?(Hash)
+fail!('missing workflow_dispatch trigger') unless triggers.key?('workflow_dispatch') || triggers.key?(:workflow_dispatch)
+push = triggers['push'] || triggers[:push]
+fail!('missing push trigger') unless push.is_a?(Hash)
+tags = push['tags'] || push[:tags]
+fail!('stable tag trigger changed') unless tags == ['v*.*.*']
+
+jobs = workflow['jobs'] || workflow[:jobs]
+fail!('missing jobs') unless jobs.is_a?(Hash)
+uploads = jobs.values.flat_map { |job| job['steps'] || job[:steps] || [] }
+              .select { |step| step['name'] == 'Upload files to GH release' }
+fail!('expected two stable release upload steps') unless uploads.length == 2
+uploads.each do |step|
+  condition = step['if'].to_s
+  fail!('stable upload can run outside a tag push') unless condition.include?("github.event_name == 'push'") && condition.include?("startsWith(github.ref, 'refs/tags/')")
+  release = step['with'] || {}
+  fail!('stable upload marked prerelease') unless release['prerelease'] == false
+end
+
+dev_job = jobs['publish-dev']
+fail!('missing rolling dev job') unless dev_job.is_a?(Hash)
+dev_condition = dev_job['if'].to_s
+fail!('dev job can run outside main push') unless dev_condition.include?("github.event_name == 'push'") && dev_condition.include?("github.ref == 'refs/heads/main'")
+dev_step = (dev_job['steps'] || []).find { |step| step['name'] == 'Publish dev-latest pre-release' }
+fail!('missing dev publish step') unless dev_step
+dev_run = dev_step['run'].to_s
+fail!('dev edit no longer preserves prerelease/latest=false') unless dev_run.include?('gh release edit dev-latest --prerelease --latest=false')
+fail!('dev create no longer preserves prerelease/latest=false') unless dev_run.include?('gh release create dev-latest --prerelease --latest=false')
+
+bootstrap = (cloud_init['write_files'] || []).find { |entry| entry['path'] == '/opt/xui-bootstrap.sh' }
+fail!('missing cloud-init bootstrap') unless bootstrap
+fail!('cloud-init default installer is not the fork') unless bootstrap['content'].include?('https://raw.githubusercontent.com/yushiro/3x-ui/main/install.sh')
+RUBY
+    then
+        snell_test_fail "release workflow semantic validation failed"
+    fi
+
+    grep -Fq 'https://raw.githubusercontent.com/yushiro/3x-ui/main/install.sh' "${REPO_ROOT}/README.md" \
+        || snell_test_fail "README default installer is not the fork"
+    grep -Fq 'XUI_REPO=owner/repository' "${REPO_ROOT}/README.md" \
+        || snell_test_fail "README lacks the compatible-fork override example"
+    grep -Fq 'stable Release' "${REPO_ROOT}/README.md" \
+        || snell_test_fail "README lacks stable-release availability guidance"
+    echo "RELEASE_WORKFLOW_SEMANTIC_PASS: ${workflow}"
+}
+
 verify_snell_readme
 
 if [[ "${XUI_SMOKE_VERSION}" == "--snell-helper-tests" ]]; then
@@ -428,6 +487,7 @@ if [[ "${XUI_SMOKE_VERSION}" == "--release-source-tests" ]]; then
     run_release_source_helper_tests "${REPO_ROOT}/install.sh"
     run_release_source_helper_tests "${REPO_ROOT}/update.sh"
     run_xui_release_source_tests
+    run_release_workflow_semantic_tests
     run_invalid_repo_no_download_test "${REPO_ROOT}/install.sh"
     run_invalid_repo_no_download_test "${REPO_ROOT}/update.sh"
     assert_release_source_call_sites "${REPO_ROOT}/install.sh"
