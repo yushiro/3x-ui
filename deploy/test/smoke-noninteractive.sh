@@ -264,8 +264,13 @@ assert_release_source_call_sites() {
     rg -Fq 'xui_release_asset_url "$xui_repo" "$tag_version"' "$script" \
         || snell_test_fail "${script}: release asset call bypasses release helper"
     raw_call_count="$(rg -F -c 'xui_raw_url "$xui_repo" "$tag_version"' "$script")"
-    [[ "$raw_call_count" -eq 5 ]] \
-        || snell_test_fail "${script}: raw resources do not consistently use tag_version"
+    if [[ "$(basename "$script")" == "update.sh" ]]; then
+        [[ "$raw_call_count" -eq 3 ]] \
+            || snell_test_fail "${script}: staged raw resources do not consistently use tag_version"
+    else
+        [[ "$raw_call_count" -eq 5 ]] \
+            || snell_test_fail "${script}: raw resources do not consistently use tag_version"
+    fi
 
     for upstream_url in \
         'MHSanaei/3x-ui/releases' \
@@ -416,11 +421,138 @@ EOF
     echo "XUI_MENU_RELEASE_SOURCE_PASS: ${script}"
 }
 
+run_update_staging_failure_tests() {
+    local script="${REPO_ROOT}/update.sh"
+    local test_root fake_bin helper_file cleanup_file stage_file update_file
+    test_root="$(mktemp -d)"
+    fake_bin="${test_root}/bin"
+    helper_file="${test_root}/release-source-helpers.sh"
+    cleanup_file="${test_root}/cleanup-function.sh"
+    stage_file="${test_root}/stage-function.sh"
+    update_file="${test_root}/update-function.sh"
+    mkdir -p "$fake_bin"
+    trap 'rm -rf "${test_root}"' RETURN
+
+    sed -n '/^# XUI_RELEASE_SOURCE_HELPERS_BEGIN$/,/^# XUI_RELEASE_SOURCE_HELPERS_END$/p' "$script" > "$helper_file"
+    extract_function "$script" cleanup_xui_update_stage > "$cleanup_file"
+    [[ -s "$cleanup_file" ]] || snell_test_fail "${script}: missing update staging cleanup helper"
+    extract_function "$script" stage_xui_update_resources > "$stage_file"
+    [[ -s "$stage_file" ]] || snell_test_fail "${script}: missing update staging helper"
+    extract_function "$script" update_x-ui > "$update_file"
+    [[ -s "$update_file" ]] || snell_test_fail "${script}: missing update function"
+
+    cat > "${fake_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+url="${!#}"
+output=""
+while [[ "$#" -gt 0 ]]; do
+    if [[ "$1" == "-o" || "$1" == "-fLRo" ]]; then
+        output="$2"
+        shift 2
+        continue
+    fi
+    shift
+done
+case "$url" in
+    */releases/download/*) asset=archive ;;
+    */x-ui.sh) asset=script ;;
+    */x-ui.rc) asset=rc ;;
+    */x-ui.service.*) asset=service ;;
+    *) exit 90 ;;
+esac
+[[ "${FAKE_FAIL_ASSET:-}" != "$asset" ]] || exit 91
+printf '%s\n' "$asset" > "$output"
+EOF
+    cat > "${fake_bin}/tar" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+dest=""
+while [[ "$#" -gt 0 ]]; do
+    if [[ "$1" == "-C" ]]; then
+        dest="$2"
+        break
+    fi
+    shift
+done
+[[ -n "$dest" ]] || exit 92
+mkdir -p "$dest/x-ui"
+printf '#!/usr/bin/env bash\n' > "$dest/x-ui/x-ui"
+chmod +x "$dest/x-ui/x-ui"
+if [[ -n "${FAKE_ARCHIVE_SERVICE:-}" ]]; then
+    : > "$dest/x-ui/${FAKE_ARCHIVE_SERVICE}"
+fi
+EOF
+    cat > "${fake_bin}/systemctl" <<'EOF'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "${FAKE_DESTRUCTIVE_LOG:?}"
+EOF
+    cat > "${fake_bin}/pkill" <<'EOF'
+#!/usr/bin/env bash
+printf 'pkill %s\n' "$*" >> "${FAKE_DESTRUCTIVE_LOG:?}"
+EOF
+    cat > "${fake_bin}/rm" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in
+        "${XUI_MAIN_FOLDER:?}"|"${XUI_SERVICE:?}"/*)
+            printf 'rm %s\n' "$*" >> "${FAKE_DESTRUCTIVE_LOG:?}"
+            ;;
+    esac
+done
+exec /bin/rm "$@"
+EOF
+    chmod +x "${fake_bin}/curl" "${fake_bin}/tar" "${fake_bin}/systemctl" "${fake_bin}/pkill" "${fake_bin}/rm"
+
+    cat "$helper_file" "$cleanup_file" "$stage_file" "$update_file" > "${test_root}/subject.sh"
+    cat >> "${test_root}/subject.sh" <<'EOF'
+load_xui_env() { :; }
+arch() { printf 'amd64\n'; }
+_fail() { exit 2; }
+EOF
+
+    local failed_asset release
+    for failed_asset in archive script service rc; do
+        release="ubuntu"
+        [[ "$failed_asset" == "rc" ]] && release="alpine"
+        local case_root="${test_root}/${failed_asset}"
+        local main_folder="${case_root}/main/x-ui"
+        local service_folder="${case_root}/service"
+        local destructive_log="${case_root}/destructive"
+        mkdir -p "${main_folder}" "${service_folder}"
+        printf '#!/usr/bin/env bash\nprintf 3.6.0\n' > "${main_folder}/x-ui"
+        chmod +x "${main_folder}/x-ui"
+        [[ "$release" == "alpine" ]] || : > "${service_folder}/x-ui.service"
+
+        if PATH="${fake_bin}:$PATH" \
+            XUI_REPO="example-owner/example-repo" XUI_UPDATE_TAG=v3.6.1 \
+            XUI_MAIN_FOLDER="$main_folder" XUI_SERVICE="$service_folder" \
+            FAKE_DESTRUCTIVE_LOG="$destructive_log" FAKE_FAIL_ASSET="$failed_asset" \
+            FAKE_RELEASE="$release" \
+            bash -c 'source "$1"; release="$FAKE_RELEASE"; curl_bin="$(command -v curl)"; update_x-ui' _ "${test_root}/subject.sh"; then
+            snell_test_fail "${script}: ${failed_asset} staging failure was accepted"
+        fi
+        [[ ! -e "$destructive_log" ]] \
+            || snell_test_fail "${script}: ${failed_asset} staging failure reached destructive actions"
+    done
+
+    local service_case_root="${test_root}/service-selection"
+    mkdir -p "${service_case_root}/main"
+    if ! PATH="${fake_bin}:$PATH" \
+        XUI_REPO="example-owner/example-repo" XUI_MAIN_FOLDER="${service_case_root}/main/x-ui" \
+        XUI_SERVICE="${service_case_root}/service" FAKE_DESTRUCTIVE_LOG="${service_case_root}/destructive" \
+        FAKE_ARCHIVE_SERVICE="x-ui.service.arch" \
+        bash -c 'source "$1"; release=ubuntu; xui_folder="$XUI_MAIN_FOLDER"; xui_repo="$XUI_REPO"; tag_version=v3.6.1; curl_bin="$(command -v curl)"; archive_path="${xui_folder%/x-ui}/archive"; : > "$archive_path"; stage_xui_update_resources "$archive_path"; [[ "$xui_update_staged_service" == */x-ui.service.debian ]]' _ "${test_root}/subject.sh"; then
+        snell_test_fail "${script}: staged service selection ignored the target OS"
+    fi
+    echo "UPDATE_STAGING_FAILURE_PASS: ${script}"
+}
+
 run_release_workflow_semantic_tests() {
     local workflow="${REPO_ROOT}/.github/workflows/release.yml"
     local cloud_init="${REPO_ROOT}/deploy/cloud-init/cloud-init.yaml"
 
-    if ! ruby -ryaml - "$workflow" "$cloud_init" <<'RUBY'
+    if ! ruby -ryaml -ropen3 -rtempfile - "$workflow" "$cloud_init" <<'RUBY'
 workflow = YAML.load_file(ARGV.fetch(0))
 cloud_init = YAML.load_file(ARGV.fetch(1))
 
@@ -443,10 +575,37 @@ uploads = jobs.values.flat_map { |job| job['steps'] || job[:steps] || [] }
 fail!('expected two stable release upload steps') unless uploads.length == 2
 uploads.each do |step|
   condition = step['if'].to_s
-  fail!('stable upload can run outside a tag push') unless condition.include?("github.event_name == 'push'") && condition.include?("startsWith(github.ref, 'refs/tags/')")
+  fail!('stable upload does not use the exact-tag classifier') unless condition.include?("needs.classify-release-tag.outputs.stable_tag == 'true'")
   release = step['with'] || {}
   fail!('stable upload marked prerelease') unless release['prerelease'] == false
 end
+
+classifier = jobs['classify-release-tag']
+fail!('missing exact stable-tag classifier') unless classifier.is_a?(Hash)
+classifier_step = (classifier['steps'] || []).find { |step| step['id'] == 'classify' }
+fail!('missing exact stable-tag classifier step') unless classifier_step
+classifier_run = classifier_step['run'].to_s
+
+def classify_tag(run, event, ref, tag)
+  Tempfile.create('github-output') do |output|
+    env = {
+      'GITHUB_EVENT_NAME' => event,
+      'GITHUB_REF' => ref,
+      'GITHUB_REF_NAME' => tag,
+      'GITHUB_OUTPUT' => output.path
+    }
+    _stdout, stderr, status = Open3.capture3(env, 'bash', '-c', run)
+    fail!("classifier execution failed: #{stderr}") unless status.success?
+    File.read(output.path)
+  end
+end
+
+stable = classify_tag(classifier_run, 'push', 'refs/tags/v3.6.1', 'v3.6.1')
+fail!('stable tag was not classified for publication') unless stable.include?('stable_tag=true')
+prerelease = classify_tag(classifier_run, 'push', 'refs/tags/v3.6.1-rc1', 'v3.6.1-rc1')
+fail!('prerelease-shaped tag was classified stable') unless prerelease.include?('stable_tag=false')
+manual = classify_tag(classifier_run, 'workflow_dispatch', 'refs/heads/main', 'v3.6.1')
+fail!('manual dispatch was classified stable') unless manual.include?('stable_tag=false')
 
 dev_job = jobs['publish-dev']
 fail!('missing rolling dev job') unless dev_job.is_a?(Hash)
@@ -487,6 +646,7 @@ if [[ "${XUI_SMOKE_VERSION}" == "--release-source-tests" ]]; then
     run_release_source_helper_tests "${REPO_ROOT}/install.sh"
     run_release_source_helper_tests "${REPO_ROOT}/update.sh"
     run_xui_release_source_tests
+    run_update_staging_failure_tests
     run_release_workflow_semantic_tests
     run_invalid_repo_no_download_test "${REPO_ROOT}/install.sh"
     run_invalid_repo_no_download_test "${REPO_ROOT}/update.sh"

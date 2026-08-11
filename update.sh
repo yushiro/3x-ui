@@ -1067,6 +1067,76 @@ _install_xui_service_unit() {
     return 0
 }
 
+cleanup_xui_update_stage() {
+    [[ -n "${xui_update_stage_dir:-}" ]] || return 0
+    rm -rf "${xui_update_stage_dir}" > /dev/null 2>&1
+    xui_update_stage_dir=""
+}
+
+stage_xui_update_resources() {
+    local archive="$1"
+    local raw_url service_file
+
+    xui_update_stage_dir="$(mktemp -d "${xui_folder%/x-ui}/.x-ui-update.XXXXXX")" || return 1
+    xui_update_staged_script="${xui_update_stage_dir}/x-ui.sh"
+    xui_update_staged_rc=""
+    xui_update_staged_service=""
+
+    if ! tar zxvf "$archive" -C "${xui_update_stage_dir}" > /dev/null 2>&1 \
+        || [[ ! -s "${xui_update_stage_dir}/x-ui/x-ui" ]]; then
+        cleanup_xui_update_stage
+        return 1
+    fi
+
+    raw_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.sh)" || {
+        cleanup_xui_update_stage
+        return 1
+    }
+    if ! ${curl_bin} -fLRo "${xui_update_staged_script}" "$raw_url" > /dev/null 2>&1 \
+        || [[ ! -s "${xui_update_staged_script}" ]]; then
+        cleanup_xui_update_stage
+        return 1
+    fi
+
+    if [[ "$release" == "alpine" ]]; then
+        xui_update_staged_rc="${xui_update_stage_dir}/x-ui.rc"
+        raw_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.rc)" || {
+            cleanup_xui_update_stage
+            return 1
+        }
+        if ! ${curl_bin} -fLRo "${xui_update_staged_rc}" "$raw_url" > /dev/null 2>&1 \
+            || [[ ! -s "${xui_update_staged_rc}" ]]; then
+            cleanup_xui_update_stage
+            return 1
+        fi
+        return 0
+    fi
+
+    if [[ -f "${xui_update_stage_dir}/x-ui/x-ui.service" ]]; then
+        xui_update_staged_service="${xui_update_stage_dir}/x-ui/x-ui.service"
+        return 0
+    fi
+    case "$release" in
+        ubuntu | debian | armbian) service_file="x-ui.service.debian" ;;
+        arch | manjaro | parch) service_file="x-ui.service.arch" ;;
+        *) service_file="x-ui.service.rhel" ;;
+    esac
+    if [[ -f "${xui_update_stage_dir}/x-ui/${service_file}" ]]; then
+        xui_update_staged_service="${xui_update_stage_dir}/x-ui/${service_file}"
+        return 0
+    fi
+    xui_update_staged_service="${xui_update_stage_dir}/${service_file}"
+    raw_url="$(xui_raw_url "$xui_repo" "$tag_version" "$service_file")" || {
+        cleanup_xui_update_stage
+        return 1
+    }
+    if ! ${curl_bin} -fLRo "${xui_update_staged_service}" "$raw_url" > /dev/null 2>&1 \
+        || [[ ! -s "${xui_update_staged_service}" ]]; then
+        cleanup_xui_update_stage
+        return 1
+    fi
+}
+
 update_x-ui() {
     local xui_repo archive_url raw_url tag_version
 
@@ -1109,6 +1179,10 @@ update_x-ui() {
     if [[ ! -s ${xui_folder}-linux-$(arch).tar.gz ]]; then
         rm ${xui_folder}-linux-$(arch).tar.gz -f > /dev/null 2>&1
         _fail "ERROR: Downloaded x-ui release archive is empty, please be sure that your server can access GitHub"
+    fi
+    if ! stage_xui_update_resources "${xui_folder}-linux-$(arch).tar.gz"; then
+        rm ${xui_folder}-linux-$(arch).tar.gz -f > /dev/null 2>&1
+        _fail "ERROR: Failed to stage all x-ui update resources before replacing the current installation"
     fi
 
     if [[ -e ${xui_folder}/ ]]; then
@@ -1161,10 +1235,11 @@ update_x-ui() {
     fi
 
     echo -e "${green}Installing new x-ui version...${plain}"
-    tar zxvf x-ui-linux-$(arch).tar.gz > /dev/null 2>&1
+    cp -a "${xui_update_stage_dir}/x-ui/." "${xui_folder}/" > /dev/null 2>&1
     if [[ $? -ne 0 ]]; then
+        cleanup_xui_update_stage
         rm x-ui-linux-$(arch).tar.gz -f > /dev/null 2>&1
-        _fail "ERROR: Failed to extract the x-ui release archive -- the previous installation has already been removed, so the panel will not start until this is fixed; try running the update again"
+        _fail "ERROR: Failed to install staged x-ui resources -- the previous installation has already been removed, so the panel will not start until this is fixed; try running the update again"
     fi
     rm x-ui-linux-$(arch).tar.gz -f > /dev/null 2>&1
     cd x-ui > /dev/null 2>&1
@@ -1199,21 +1274,9 @@ update_x-ui() {
     fi
 
     echo -e "${green}Downloading and installing x-ui.sh script...${plain}"
-    local xui_script_temp="/usr/bin/x-ui-temp.$$"
-    rm -f "${xui_script_temp}"
-    raw_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.sh)" || _fail "ERROR: Invalid x-ui.sh release source"
-    ${curl_bin} -fLRo "${xui_script_temp}" "$raw_url" > /dev/null 2>&1
+    mv -f "${xui_update_staged_script}" /usr/bin/x-ui
     if [[ $? -ne 0 ]]; then
-        rm -f "${xui_script_temp}"
-        _fail "ERROR: Failed to download x-ui.sh script, please be sure that your server can access GitHub"
-    fi
-    if [[ ! -s "${xui_script_temp}" ]]; then
-        rm -f "${xui_script_temp}"
-        _fail "ERROR: Downloaded x-ui.sh script is empty, please be sure that your server can access GitHub"
-    fi
-    mv -f "${xui_script_temp}" /usr/bin/x-ui
-    if [[ $? -ne 0 ]]; then
-        rm -f "${xui_script_temp}"
+        cleanup_xui_update_stage
         _fail "ERROR: Failed to install x-ui.sh script"
     fi
 
@@ -1231,21 +1294,9 @@ update_x-ui() {
 
     if [[ $release == "alpine" ]]; then
         echo -e "${green}Downloading and installing startup unit x-ui.rc...${plain}"
-        xui_rc_temp="/etc/init.d/x-ui.tmp.$$"
-        rm -f "${xui_rc_temp}"
-        raw_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.rc)" || _fail "ERROR: Invalid x-ui.rc release source"
-        ${curl_bin} -fLRo "${xui_rc_temp}" "$raw_url" > /dev/null 2>&1
+        mv -f "${xui_update_staged_rc}" /etc/init.d/x-ui
         if [[ $? -ne 0 ]]; then
-            rm -f "${xui_rc_temp}"
-            _fail "ERROR: Failed to download startup unit x-ui.rc, please be sure that your server can access GitHub"
-        fi
-        if [[ ! -s "${xui_rc_temp}" ]]; then
-            rm -f "${xui_rc_temp}"
-            _fail "ERROR: Downloaded startup unit x-ui.rc is empty, please be sure that your server can access GitHub"
-        fi
-        mv -f "${xui_rc_temp}" /etc/init.d/x-ui
-        if [[ $? -ne 0 ]]; then
-            rm -f "${xui_rc_temp}"
+            cleanup_xui_update_stage
             _fail "ERROR: Failed to install startup unit x-ui.rc"
         fi
         chmod +x /etc/init.d/x-ui > /dev/null 2>&1
@@ -1253,61 +1304,10 @@ update_x-ui() {
         rc-update add x-ui > /dev/null 2>&1
         rc-service x-ui start > /dev/null 2>&1
     else
-        if [ -f "x-ui.service" ]; then
-            echo -e "${green}Installing systemd unit...${plain}"
-            if ! _install_xui_service_unit "x-ui.service" "false"; then
-                echo -e "${red}Failed to copy x-ui.service${plain}"
-                exit 1
-            fi
-        else
-            service_installed=false
-            case "${release}" in
-                ubuntu | debian | armbian)
-                    if [ -f "x-ui.service.debian" ]; then
-                        echo -e "${green}Installing debian-like systemd unit...${plain}"
-                        if _install_xui_service_unit "x-ui.service.debian" "false"; then
-                            service_installed=true
-                        fi
-                    fi
-                    ;;
-                arch | manjaro | parch)
-                    if [ -f "x-ui.service.arch" ]; then
-                        echo -e "${green}Installing arch-like systemd unit...${plain}"
-                        if _install_xui_service_unit "x-ui.service.arch" "false"; then
-                            service_installed=true
-                        fi
-                    fi
-                    ;;
-                *)
-                    if [ -f "x-ui.service.rhel" ]; then
-                        echo -e "${green}Installing rhel-like systemd unit...${plain}"
-                        if _install_xui_service_unit "x-ui.service.rhel" "false"; then
-                            service_installed=true
-                        fi
-                    fi
-                    ;;
-            esac
-
-            # If service file not found in tar.gz, download from GitHub
-            if [ "$service_installed" = false ]; then
-                echo -e "${yellow}Service files not found in tar.gz, downloading from GitHub...${plain}"
-                case "${release}" in
-                    ubuntu | debian | armbian)
-                        service_unit_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.service.debian)" || _fail "ERROR: Invalid Debian service release source"
-                        ;;
-                    arch | manjaro | parch)
-                        service_unit_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.service.arch)" || _fail "ERROR: Invalid Arch service release source"
-                        ;;
-                    *)
-                        service_unit_url="$(xui_raw_url "$xui_repo" "$tag_version" x-ui.service.rhel)" || _fail "ERROR: Invalid RHEL service release source"
-                        ;;
-                esac
-
-                if ! _install_xui_service_unit "$service_unit_url" "true"; then
-                    echo -e "${red}Failed to install x-ui.service from GitHub${plain}"
-                    exit 1
-                fi
-            fi
+        if ! _install_xui_service_unit "${xui_update_staged_service}" "false"; then
+            cleanup_xui_update_stage
+            echo -e "${red}Failed to install staged x-ui.service${plain}"
+            exit 1
         fi
         chown root:root ${xui_service}/x-ui.service > /dev/null 2>&1
         chmod 644 ${xui_service}/x-ui.service > /dev/null 2>&1
@@ -1315,6 +1315,8 @@ update_x-ui() {
         systemctl enable x-ui > /dev/null 2>&1
         systemctl start x-ui > /dev/null 2>&1
     fi
+
+    cleanup_xui_update_stage
 
     config_after_update
 

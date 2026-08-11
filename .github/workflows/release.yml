@@ -30,7 +30,23 @@ on:
       - ".github/workflows/release.yml"
 
 jobs:
+  classify-release-tag:
+    name: Classify stable release tag
+    runs-on: ubuntu-latest
+    outputs:
+      stable_tag: ${{ steps.classify.outputs.stable_tag }}
+    steps:
+      - id: classify
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "stable_tag=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "stable_tag=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: classify-release-tag
     permissions:
       contents: write
     strategy:
@@ -193,7 +209,7 @@ jobs:
 
       - name: Upload files to GH release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        if: needs.classify-release-tag.outputs.stable_tag == 'true'
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
@@ -207,6 +223,7 @@ jobs:
   # =================================
   build-windows:
     name: Build for Windows
+    needs: classify-release-tag
     permissions:
       contents: write
     strategy:
@@ -324,7 +341,7 @@ jobs:
 
       - name: Upload files to GH release
         uses: svenstaro/upload-release-action@v2
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+        if: needs.classify-release-tag.outputs.stable_tag == 'true'
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.ref_name }}
