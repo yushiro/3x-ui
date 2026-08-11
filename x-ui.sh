@@ -78,6 +78,46 @@ else
 fi
 echo "The OS release is: $release"
 
+# XUI_RELEASE_SOURCE_HELPERS_BEGIN
+XUI_DEFAULT_REPO="yushiro/3x-ui"
+
+xui_resolve_repo() {
+    local repo="${XUI_REPO:-${XUI_DEFAULT_REPO}}"
+    [[ "$repo" =~ ^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?/[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$ ]] || {
+        echo "Invalid XUI_REPO: ${repo}" >&2
+        return 2
+    }
+    printf '%s\n' "$repo"
+}
+
+xui_validate_stable_tag() { [[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+xui_validate_release_ref() { [[ "$1" == "dev-latest" ]] || xui_validate_stable_tag "$1"; }
+xui_release_api_url() { printf 'https://api.github.com/repos/%s/releases/latest\n' "$1"; }
+xui_release_asset_url() { printf 'https://github.com/%s/releases/download/%s/%s\n' "$1" "$2" "$3"; }
+xui_raw_url() {
+    case "$3" in
+        install.sh|update.sh|x-ui.sh|x-ui.rc|x-ui.service.debian|x-ui.service.arch|x-ui.service.rhel) ;;
+        *) return 2 ;;
+    esac
+    xui_validate_release_ref "$2" || return 2
+    printf 'https://raw.githubusercontent.com/%s/%s/%s\n' "$1" "$2" "$3"
+}
+# XUI_RELEASE_SOURCE_HELPERS_END
+
+xui_latest_stable_tag() {
+    local repo api tag
+    repo="$(xui_resolve_repo)" || return 1
+    api="$(xui_release_api_url "$repo")" || return 1
+    tag="$(curl -fsSL --retry 5 --retry-delay 3 --connect-timeout 15 "$api" |
+        sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+        head -n 1)" || return 1
+    xui_validate_stable_tag "$tag" || return 1
+    printf '%s\n' "$tag"
+}
+
+xui_repo="$(xui_resolve_repo)" || exit 1
+export XUI_REPO="$xui_repo"
+
 os_version=""
 os_version=$(grep "^VERSION_ID" /etc/os-release | cut -d '=' -f2 | tr -d '"' | tr -d '.')
 
@@ -129,7 +169,23 @@ before_show_menu() {
 }
 
 install() {
-    bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/main/install.sh)
+    local repo tag installer_url
+    repo="$(xui_resolve_repo)" || return 1
+    export XUI_REPO="$repo"
+    if [[ $# == 0 ]]; then
+        tag="$(xui_latest_stable_tag)" || {
+            LOGE "Failed to resolve the latest stable release"
+            return 1
+        }
+    else
+        tag="$1"
+        xui_validate_stable_tag "$tag" || {
+            LOGE "Invalid stable release tag: ${tag}"
+            return 1
+        }
+    fi
+    installer_url="$(xui_raw_url "$repo" "$tag" install.sh)" || return 1
+    XUI_REPO="$repo" bash <(curl -fsSL "$installer_url") "$tag"
     if [[ $? == 0 ]]; then
         if [[ $# == 0 ]]; then
             start
@@ -140,6 +196,7 @@ install() {
 }
 
 update() {
+    local repo tag updater_url
     confirm "This function will update all x-ui components to the latest version, and the data will not be lost. Do you want to continue?" "y"
     if [[ $? != 0 ]]; then
         LOGE "Cancelled"
@@ -148,7 +205,14 @@ update() {
         fi
         return 0
     fi
-    bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/main/update.sh)
+    repo="$(xui_resolve_repo)" || return 1
+    export XUI_REPO="$repo"
+    tag="$(xui_latest_stable_tag)" || {
+        LOGE "Failed to resolve the latest stable release"
+        return 1
+    }
+    updater_url="$(xui_raw_url "$repo" "$tag" update.sh)" || return 1
+    XUI_UPDATE_TAG="$tag" XUI_REPO="$repo" bash <(curl -fsSL "$updater_url")
     if [[ $? == 0 ]]; then
         LOGI "Update is complete, Panel has automatically restarted "
         before_show_menu
@@ -156,6 +220,7 @@ update() {
 }
 
 update_dev() {
+    local repo ref="dev-latest" updater_url
     confirm "This will update x-ui to the latest DEV commit (the rolling 'dev-latest' build, not a stable release). Your data is preserved. Continue?" "y"
     if [[ $? != 0 ]]; then
         LOGE "Cancelled"
@@ -164,9 +229,10 @@ update_dev() {
         fi
         return 0
     fi
-    # XUI_UPDATE_TAG tells update.sh to install the dev-latest pre-release
-    # instead of the latest stable tag.
-    XUI_UPDATE_TAG="dev-latest" bash <(curl -Ls https://raw.githubusercontent.com/MHSanaei/3x-ui/main/update.sh)
+    repo="$(xui_resolve_repo)" || return 1
+    export XUI_REPO="$repo"
+    updater_url="$(xui_raw_url "$repo" "$ref" update.sh)" || return 1
+    XUI_UPDATE_TAG="$ref" XUI_REPO="$repo" bash <(curl -fsSL "$updater_url")
     if [[ $? == 0 ]]; then
         LOGI "Dev update is complete, Panel has automatically restarted "
         before_show_menu
@@ -209,6 +275,7 @@ replace_xui_script() {
 }
 
 update_menu() {
+    local tag script_url
     echo -e "${yellow}Updating Menu${plain}"
     confirm "This function will update the menu to the latest changes." "y"
     if [[ $? != 0 ]]; then
@@ -219,7 +286,12 @@ update_menu() {
         return 0
     fi
 
-    if replace_xui_script "https://raw.githubusercontent.com/MHSanaei/3x-ui/main/x-ui.sh" "false"; then
+    tag="$(xui_latest_stable_tag)" || {
+        LOGE "Failed to resolve the latest stable release"
+        return 1
+    }
+    script_url="$(xui_raw_url "$XUI_REPO" "$tag" x-ui.sh)" || return 1
+    if replace_xui_script "$script_url" "false"; then
         chmod +x ${xui_folder}/x-ui.sh
         echo -e "${green}Update successful. The panel has automatically restarted.${plain}"
         exit 0
@@ -230,6 +302,7 @@ update_menu() {
 }
 
 legacy_version() {
+    local repo installer_url
     echo -n "Enter the panel version (like 2.4.0):"
     read -r tag_version
 
@@ -237,11 +310,16 @@ legacy_version() {
         echo "Panel version cannot be empty. Exiting."
         exit 1
     fi
-    # Use the entered panel version in the download link
-    install_command="bash <(curl -Ls "https://raw.githubusercontent.com/mhsanaei/3x-ui/v$tag_version/install.sh") v$tag_version"
+    tag_version="v${tag_version#v}"
+    xui_validate_stable_tag "$tag_version" || {
+        LOGE "Invalid stable release tag: ${tag_version}"
+        return 1
+    }
+    repo="$(xui_resolve_repo)" || return 1
+    installer_url="$(xui_raw_url "$repo" "$tag_version" install.sh)" || return 1
 
     echo "Downloading and installing panel version $tag_version..."
-    eval $install_command
+    XUI_REPO="$repo" bash <(curl -fsSL "$installer_url") "$tag_version"
 }
 
 # Function to handle the deletion of the script file
@@ -303,7 +381,7 @@ uninstall() {
     echo ""
     echo -e "Uninstalled Successfully.\n"
     echo "If you need to install this panel again, you can use below command:"
-    echo -e "${green}bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh)${plain}"
+    echo -e "${green}bash <(curl -fsSL $(xui_raw_url "$XUI_REPO" dev-latest install.sh)) dev-latest${plain}"
     echo ""
     # Trap the SIGTERM signal
     trap delete_script SIGTERM
@@ -836,7 +914,13 @@ enable_bbr() {
 }
 
 update_shell() {
-    if replace_xui_script "https://github.com/MHSanaei/3x-ui/raw/main/x-ui.sh" "true"; then
+    local tag script_url
+    tag="$(xui_latest_stable_tag)" || {
+        LOGE "Failed to resolve the latest stable release"
+        return 1
+    }
+    script_url="$(xui_raw_url "$XUI_REPO" "$tag" x-ui.sh)" || return 1
+    if replace_xui_script "$script_url" "true"; then
         LOGI "Upgrade script succeeded, Please rerun the script"
         before_show_menu
     else

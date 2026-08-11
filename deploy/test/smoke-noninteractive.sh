@@ -277,6 +277,145 @@ assert_release_source_call_sites() {
     done
 }
 
+extract_function() {
+    local script="$1"
+    local function_name="$2"
+    awk -v name="$function_name" '
+        $0 ~ "^" name "\\(\\)[[:space:]]*\\{" { found = 1 }
+        found {
+            print
+            opens = gsub(/\{/, "{")
+            closes = gsub(/\}/, "}")
+            depth += opens - closes
+            if (depth == 0) exit
+        }
+    ' "$script"
+}
+
+run_xui_release_source_tests() {
+    local script="${REPO_ROOT}/x-ui.sh"
+    local test_root fake_bin helper_file function_file url_log child_log replacement_log
+    test_root="$(mktemp -d)"
+    fake_bin="${test_root}/bin"
+    helper_file="${test_root}/release-source-helpers.sh"
+    function_file="${test_root}/xui-menu-functions.sh"
+    url_log="${test_root}/urls"
+    child_log="${test_root}/children"
+    replacement_log="${test_root}/replacements"
+    mkdir -p "$fake_bin"
+    trap 'rm -rf "${test_root}"' RETURN
+
+    sed -n '/^# XUI_RELEASE_SOURCE_HELPERS_BEGIN$/,/^# XUI_RELEASE_SOURCE_HELPERS_END$/p' "$script" > "$helper_file"
+    [[ -s "$helper_file" ]] || snell_test_fail "${script}: missing release source helper block"
+
+    for required in xui_latest_stable_tag install update update_dev update_menu update_shell; do
+        extract_function "$script" "$required" >> "$function_file"
+        [[ -s "$function_file" ]] || snell_test_fail "${script}: missing ${required} function"
+    done
+
+    cat > "${fake_bin}/curl" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+url="${!#}"
+printf '%s|%s|%s\n' "$url" "${XUI_REPO:-}" "${XUI_UPDATE_TAG:-}" >> "${FAKE_URL_LOG:?}"
+case "$url" in
+    https://api.github.com/repos/example-owner/example-repo/releases/latest)
+        printf '{"tag_name":"v3.6.1"}\n'
+        ;;
+    https://raw.githubusercontent.com/example-owner/example-repo/v3.6.1/install.sh)
+        printf '%s\n' 'printf "install|%s|%s|%s\n" "${XUI_REPO:-}" "${XUI_UPDATE_TAG:-}" "${1:-}" >> "${FAKE_CHILD_LOG:?}"'
+        ;;
+    https://raw.githubusercontent.com/example-owner/example-repo/v3.6.1/update.sh)
+        printf '%s\n' 'printf "update|%s|%s|%s\n" "${XUI_REPO:-}" "${XUI_UPDATE_TAG:-}" "${1:-}" >> "${FAKE_CHILD_LOG:?}"'
+        ;;
+    https://raw.githubusercontent.com/example-owner/example-repo/dev-latest/update.sh)
+        printf '%s\n' 'printf "update-dev|%s|%s|%s\n" "${XUI_REPO:-}" "${XUI_UPDATE_TAG:-}" "${1:-}" >> "${FAKE_CHILD_LOG:?}"'
+        ;;
+    *) exit 90 ;;
+esac
+EOF
+    chmod +x "${fake_bin}/curl"
+
+    cat "$helper_file" "$function_file" > "${test_root}/subject.sh"
+    cat >> "${test_root}/subject.sh" <<'EOF'
+LOGE() { :; }
+LOGI() { :; }
+before_show_menu() { :; }
+start() { :; }
+confirm() { return 0; }
+replace_xui_script() { printf '%s|%s\n' "$1" "$2" >> "${FAKE_REPLACEMENT_LOG:?}"; }
+EOF
+
+    PATH="${fake_bin}:$PATH" XUI_REPO="example-owner/example-repo" \
+        FAKE_URL_LOG="$url_log" FAKE_CHILD_LOG="$child_log" \
+        FAKE_REPLACEMENT_LOG="$replacement_log" \
+        bash -c 'source "$1"; install' _ "${test_root}/subject.sh" \
+        || snell_test_fail "${script}: stable install failed"
+    grep -Fqx 'https://api.github.com/repos/example-owner/example-repo/releases/latest|example-owner/example-repo|' "$url_log" \
+        || snell_test_fail "${script}: stable install did not resolve the fork latest tag"
+    grep -Fqx 'https://raw.githubusercontent.com/example-owner/example-repo/v3.6.1/install.sh|example-owner/example-repo|' "$url_log" \
+        || snell_test_fail "${script}: stable install did not download the tagged fork script"
+    grep -Fqx 'install|example-owner/example-repo||v3.6.1' "$child_log" \
+        || snell_test_fail "${script}: stable install did not pass its resolved tag"
+
+    : > "$url_log"
+    : > "$child_log"
+    PATH="${fake_bin}:$PATH" XUI_REPO="example-owner/example-repo" \
+        FAKE_URL_LOG="$url_log" FAKE_CHILD_LOG="$child_log" \
+        FAKE_REPLACEMENT_LOG="$replacement_log" \
+        bash -c 'source "$1"; update' _ "${test_root}/subject.sh" \
+        || snell_test_fail "${script}: stable update failed"
+    grep -Fqx 'https://raw.githubusercontent.com/example-owner/example-repo/v3.6.1/update.sh|example-owner/example-repo|' "$url_log" \
+        || snell_test_fail "${script}: stable update did not download the tagged fork script"
+    grep -Fqx 'update|example-owner/example-repo|v3.6.1|' "$child_log" \
+        || snell_test_fail "${script}: stable update did not propagate XUI_UPDATE_TAG"
+
+    : > "$url_log"
+    : > "$child_log"
+    PATH="${fake_bin}:$PATH" XUI_REPO="example-owner/example-repo" \
+        FAKE_URL_LOG="$url_log" FAKE_CHILD_LOG="$child_log" \
+        FAKE_REPLACEMENT_LOG="$replacement_log" \
+        bash -c 'source "$1"; update_dev' _ "${test_root}/subject.sh" \
+        || snell_test_fail "${script}: dev update failed"
+    if grep -Fq '/releases/latest' "$url_log"; then
+        snell_test_fail "${script}: dev update queried stable latest"
+    fi
+    grep -Fqx 'https://raw.githubusercontent.com/example-owner/example-repo/dev-latest/update.sh|example-owner/example-repo|' "$url_log" \
+        || snell_test_fail "${script}: dev update did not download the dev ref"
+    grep -Fqx 'update-dev|example-owner/example-repo|dev-latest|' "$child_log" \
+        || snell_test_fail "${script}: dev update did not propagate dev-latest"
+
+    : > "$url_log"
+    : > "$replacement_log"
+    PATH="${fake_bin}:$PATH" XUI_REPO="example-owner/example-repo" \
+        FAKE_URL_LOG="$url_log" FAKE_CHILD_LOG="$child_log" \
+        FAKE_REPLACEMENT_LOG="$replacement_log" \
+        bash -c 'source "$1"; update_shell' _ "${test_root}/subject.sh" \
+        || snell_test_fail "${script}: shell update failed"
+    grep -Fqx 'https://raw.githubusercontent.com/example-owner/example-repo/v3.6.1/x-ui.sh|true' "$replacement_log" \
+        || snell_test_fail "${script}: shell update did not use its stable fork ref"
+
+    : > "$url_log"
+    if PATH="${fake_bin}:$PATH" XUI_REPO="example-owner/example-repo" \
+        FAKE_URL_LOG="$url_log" FAKE_CHILD_LOG="$child_log" \
+        FAKE_REPLACEMENT_LOG="$replacement_log" \
+        bash -c 'source "$1"; install v3.6.1-snell' _ "${test_root}/subject.sh"; then
+        snell_test_fail "${script}: invalid stable install tag was accepted"
+    fi
+    [[ ! -s "$url_log" ]] \
+        || snell_test_fail "${script}: invalid stable install tag invoked curl"
+
+    for required in install update update_dev update_shell; do
+        extract_function "$script" "$required" > "${test_root}/${required}.sh"
+        grep -q 'xui_' "${test_root}/${required}.sh" \
+            || snell_test_fail "${script}: ${required} does not use a release source helper"
+    done
+    if grep -Eq 'raw\.githubusercontent\.com/MHSanaei/3x-ui|github\.com/MHSanaei/3x-ui/raw' "$script"; then
+        snell_test_fail "${script}: upstream raw URL remains"
+    fi
+    echo "XUI_MENU_RELEASE_SOURCE_PASS: ${script}"
+}
+
 verify_snell_readme
 
 if [[ "${XUI_SMOKE_VERSION}" == "--snell-helper-tests" ]]; then
@@ -288,6 +427,7 @@ fi
 if [[ "${XUI_SMOKE_VERSION}" == "--release-source-tests" ]]; then
     run_release_source_helper_tests "${REPO_ROOT}/install.sh"
     run_release_source_helper_tests "${REPO_ROOT}/update.sh"
+    run_xui_release_source_tests
     run_invalid_repo_no_download_test "${REPO_ROOT}/install.sh"
     run_invalid_repo_no_download_test "${REPO_ROOT}/update.sh"
     assert_release_source_call_sites "${REPO_ROOT}/install.sh"
